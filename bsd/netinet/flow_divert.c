@@ -1186,7 +1186,7 @@ flow_divert_create_connect_packet(struct flow_divert_pcb *fd_cb, struct sockaddr
 	if (fd_cb->local_address != NULL) {
 		/* socket is bound. */
 		error = flow_divert_packet_append_tlv(connect_packet, FLOW_DIVERT_TLV_LOCAL_ADDR,
-		                                      sizeof(struct sockaddr_storage), fd_cb->local_address);
+		                                      fd_cb->local_address->sa_len, fd_cb->local_address);
 		if (error) {
 			goto done;
 		}
@@ -1913,18 +1913,20 @@ flow_divert_handle_close(struct flow_divert_pcb *fd_cb, mbuf_t packet, int offse
 static mbuf_t
 flow_divert_get_control_mbuf(struct flow_divert_pcb *fd_cb)
 {
-	struct inpcb *inp = sotoinpcb(fd_cb->so);
-	if (inp->inp_vflag & INP_IPV4 && inp->inp_flags & INP_RECVDSTADDR) {
-		struct sockaddr_in *sin = (struct sockaddr_in *)(void *)fd_cb->local_address;
+	if (fd_cb->local_address != NULL) {
+		struct inpcb *inp = sotoinpcb(fd_cb->so);
+		if (inp->inp_vflag & INP_IPV4 && inp->inp_flags & INP_RECVDSTADDR) {
+			struct sockaddr_in *sin = (struct sockaddr_in *)(void *)fd_cb->local_address;
 
-		return sbcreatecontrol((caddr_t) &sin->sin_addr, sizeof(struct in_addr), IP_RECVDSTADDR, IPPROTO_IP);
-	} else if (inp->inp_vflag & INP_IPV6 && (inp->inp_flags & IN6P_PKTINFO) != 0) {
-		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)(void *)fd_cb->local_address;
-		struct in6_pktinfo pi6;
+			return sbcreatecontrol((caddr_t) &sin->sin_addr, sizeof(struct in_addr), IP_RECVDSTADDR, IPPROTO_IP);
+		} else if (inp->inp_vflag & INP_IPV6 && (inp->inp_flags & IN6P_PKTINFO) != 0) {
+			struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)(void *)fd_cb->local_address;
+			struct in6_pktinfo pi6;
 
-		bcopy(&sin6->sin6_addr, &pi6.ipi6_addr, sizeof (struct in6_addr));
-		pi6.ipi6_ifindex = 0;
-		return sbcreatecontrol((caddr_t)&pi6, sizeof (struct in6_pktinfo), IPV6_PKTINFO, IPPROTO_IPV6);
+			bcopy(&sin6->sin6_addr, &pi6.ipi6_addr, sizeof (struct in6_addr));
+			pi6.ipi6_ifindex = 0;
+			return sbcreatecontrol((caddr_t)&pi6, sizeof (struct in6_pktinfo), IPV6_PKTINFO, IPPROTO_IPV6);
+		}
 	}
 	return (NULL);
 }
@@ -2017,10 +2019,6 @@ flow_divert_handle_data(struct flow_divert_pcb *fd_cb, mbuf_t packet, size_t off
 			}
 		}
 		socket_unlock(fd_cb->so, 0);
-
-		if (data != NULL) {
-			mbuf_freem(data);
-		}
 	}
 	FDUNLOCK(fd_cb);
 }
