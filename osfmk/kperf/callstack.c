@@ -254,7 +254,7 @@ kperf_backtrace_sample(struct kp_kcallstack *cs, struct kperf_context *context)
 		cs->kpkc_nframes += 1;
 	}
 	if (trunc) {
-		cs->kpkc_nframes |= CALLSTACK_TRUNCATED;
+		cs->kpkc_flags |= CALLSTACK_TRUNCATED;
 	}
 
 	BUF_VERB(PERF_CS_BACKTRACE | DBG_FUNC_END, cs->kpkc_nframes);
@@ -335,23 +335,29 @@ kperf_ucallstack_sample(struct kp_ucallstack *cs, struct kperf_context *context)
 
 	bool user64 = false;
 	bool trunc = false;
-	int err = backtrace_thread_user(thread, cs->kpuc_frames,
-	    cs->kpuc_nframes - 1, &cs->kpuc_nframes, &user64, &trunc);
-	cs->kpuc_flags = CALLSTACK_KERNEL_WORDS;
-	if (user64) {
-		cs->kpuc_flags |= CALLSTACK_64BIT;
-	}
-	if (trunc) {
-		cs->kpuc_flags |= CALLSTACK_TRUNCATED;
-	}
+	int error = 0;
+	/*
+	 * Leave space for the fixup information.
+	 */
+	unsigned int maxnframes = cs->kpuc_nframes - 1;
+	unsigned int nframes = backtrace_thread_user(thread, cs->kpuc_frames,
+	    maxnframes, &error, &user64, &trunc);
+	cs->kpuc_nframes = MIN(maxnframes, nframes);
 
-	if (!err || err == EFAULT) {
+	/*
+	 * Ignore EFAULT to get as much of the stack as possible.  It will be
+	 * marked as truncated, below.
+	 */
+	if (error == 0 || error == EFAULT) {
 		callstack_fixup_user(cs, thread);
 		cs->kpuc_flags |= CALLSTACK_VALID;
 	} else {
 		cs->kpuc_nframes = 0;
-		BUF_INFO(PERF_CS_ERROR, ERR_GETSTACK, err);
+		BUF_INFO(PERF_CS_ERROR, ERR_GETSTACK, error);
 	}
+
+	cs->kpuc_flags |= CALLSTACK_KERNEL_WORDS | (user64 ? CALLSTACK_64BIT : 0) |
+	    (trunc ? CALLSTACK_TRUNCATED : 0);
 
 	BUF_INFO(PERF_CS_USAMPLE | DBG_FUNC_END, (uintptr_t)thread_tid(thread),
 	    cs->kpuc_flags, cs->kpuc_nframes);
@@ -437,12 +443,15 @@ kperf_ucallstack_log(struct kp_ucallstack *cs)
 }
 
 int
-kperf_ucallstack_pend(struct kperf_context * context, uint32_t depth)
+kperf_ucallstack_pend(struct kperf_context * context, uint32_t depth,
+    unsigned int actionid)
 {
-	int did_pend = kperf_ast_pend(context->cur_thread, T_KPERF_AST_CALLSTACK);
+	if (depth < 2) {
+		panic("HUH");
+	}
 	kperf_ast_set_callstack_depth(context->cur_thread, depth);
-
-	return did_pend;
+	return kperf_ast_pend(context->cur_thread, T_KPERF_AST_CALLSTACK,
+	    actionid);
 }
 
 static kern_return_t

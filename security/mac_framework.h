@@ -271,6 +271,9 @@ int     mac_mount_check_snapshot_create(vfs_context_t ctx, struct mount *mp,
     const char *name);
 int     mac_mount_check_snapshot_delete(vfs_context_t ctx, struct mount *mp,
     const char *name);
+int     mac_mount_check_snapshot_mount(vfs_context_t ctx, struct vnode *rvp,
+    struct vnode *vp, struct componentname *cnp, const char *name,
+    const char *vfc_name);
 int     mac_mount_check_snapshot_revert(vfs_context_t ctx, struct mount *mp,
     const char *name);
 int     mac_mount_check_remount(vfs_context_t ctx, struct mount *mp);
@@ -339,6 +342,7 @@ void    mac_posixshm_label_init(struct pshminfo *pshm);
 int     mac_priv_check(kauth_cred_t cred, int priv);
 int     mac_priv_grant(kauth_cred_t cred, int priv);
 int     mac_proc_check_debug(proc_t proc1, proc_t proc2);
+int     mac_proc_check_dump_core(proc_t proc);
 int     mac_proc_check_proc_info(proc_t curp, proc_t target, int callnum, int flavor);
 int     mac_proc_check_get_cs_info(proc_t curp, proc_t target, unsigned int op);
 int     mac_proc_check_set_cs_info(proc_t curp, proc_t target, unsigned int op);

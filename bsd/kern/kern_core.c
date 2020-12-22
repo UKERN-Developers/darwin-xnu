@@ -66,10 +66,9 @@
 
 #include <security/audit/audit.h>
 
-#if CONFIG_CSR
-#include <sys/codesign.h>
-#include <sys/csr.h>
-#endif
+#if CONFIG_MACF
+#include <security/mac_framework.h>
+#endif /* CONFIG_MACF */
 
 typedef struct {
 	int     flavor;                 /* the number for this flavor */
@@ -221,7 +220,7 @@ collectth_state(thread_t th_act, void *tirp)
  *				coredump_flags	Extra options (ignore rlimit, run fsync)
  *
  * Returns:	0				Success
- *		EFAULT				Failed
+ *		!0				Failure errno
  *
  * IMPORTANT:	This function can only be called on the current process, due
  *		to assumptions below; see variable declaration section for
@@ -252,7 +251,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 	int             error1 = 0;
 	char            stack_name[MAXCOMLEN + 6];
 	char            *alloced_name = NULL;
-	char            *name;
+	char            *name = NULL;
 	mythread_state_flavor_t flavors[MAX_TSTATE_FLAVORS];
 	vm_size_t       mapsize;
 	int             i;
@@ -276,23 +275,14 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 	    ((sugid_coredump == 0) &&   /* Not dumping SUID/SGID binaries */
 	    ((kauth_cred_getsvuid(cred) != kauth_cred_getruid(cred)) ||
 	    (kauth_cred_getsvgid(cred) != kauth_cred_getrgid(cred))))) {
-#if CONFIG_AUDIT
-		audit_proc_coredump(core_proc, NULL, EFAULT);
-#endif
-		return EFAULT;
+		error = EFAULT;
+		goto out2;
 	}
 
-#if CONFIG_CSR
-	/* If the process is restricted, CSR isn't configured to allow
-	 * restricted processes to be debugged, and CSR isn't configured in
-	 * AppleInternal mode, then don't dump core. */
-	if (cs_restricted(core_proc) &&
-	    csr_check(CSR_ALLOW_TASK_FOR_PID) &&
-	    csr_check(CSR_ALLOW_APPLE_INTERNAL)) {
-#if CONFIG_AUDIT
-		audit_proc_coredump(core_proc, NULL, EFAULT);
-#endif
-		return EFAULT;
+#if CONFIG_MACF
+	error = mac_proc_check_dump_core(core_proc);
+	if (error != 0) {
+		goto out2;
 	}
 #endif
 
@@ -306,7 +296,8 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 
 	if (((coredump_flags & COREDUMP_IGNORE_ULIMIT) == 0) &&
 	    (mapsize >= core_proc->p_rlimit[RLIMIT_CORE].rlim_cur)) {
-		return EFAULT;
+		error = EFAULT;
+		goto out2;
 	}
 
 	(void) task_suspend_internal(task);

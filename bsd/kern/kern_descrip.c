@@ -282,6 +282,30 @@ file_lock_init(void)
 }
 
 
+void
+proc_dirs_lock_shared(proc_t p)
+{
+	lck_rw_lock_shared(&p->p_dirs_lock);
+}
+
+void
+proc_dirs_unlock_shared(proc_t p)
+{
+	lck_rw_unlock_shared(&p->p_dirs_lock);
+}
+
+void
+proc_dirs_lock_exclusive(proc_t p)
+{
+	lck_rw_lock_exclusive(&p->p_dirs_lock);
+}
+
+void
+proc_dirs_unlock_exclusive(proc_t p)
+{
+	lck_rw_unlock_exclusive(&p->p_dirs_lock);
+}
+
 /*
  * proc_fdlock, proc_fdlock_spin
  *
@@ -1972,7 +1996,7 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 
 			kernel_blob_size = CAST_DOWN(vm_size_t, fs.fs_blob_size);
 			kr = ubc_cs_blob_allocate(&kernel_blob_addr, &kernel_blob_size);
-			if (kr != KERN_SUCCESS) {
+			if (kr != KERN_SUCCESS || kernel_blob_size < fs.fs_blob_size) {
 				error = ENOMEM;
 				vnode_put(vp);
 				goto outdrop;
@@ -1981,7 +2005,7 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			if (uap->cmd == F_ADDSIGS) {
 				error = copyin(fs.fs_blob_start,
 				    (void *) kernel_blob_addr,
-				    kernel_blob_size);
+				    fs.fs_blob_size);
 			} else { /* F_ADDFILESIGS || F_ADDFILESIGS_RETURN || F_ADDFILESIGS_FOR_DYLD_SIM */
 				int resid;
 
@@ -5061,6 +5085,7 @@ fdcopy(proc_t p, vnode_t uth_cdir)
 	}
 	/* Coming from a chroot environment and unable to get a reference... */
 	if (newfdp->fd_rdir == NULL && fdp->fd_rdir) {
+		proc_fdunlock(p);
 		/*
 		 * We couldn't get a new reference on
 		 * the chroot directory being

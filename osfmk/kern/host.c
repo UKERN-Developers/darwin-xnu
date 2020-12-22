@@ -1278,6 +1278,10 @@ kernel_set_special_port(host_priv_t host_priv, int id, ipc_port_t port)
 
 	host_lock(host_priv);
 	old_port = host_priv->special[id];
+	if ((id == HOST_AMFID_PORT) && (task_pid(current_task()) != 1)) {
+		host_unlock(host_priv);
+		return KERN_NO_ACCESS;
+	}
 	host_priv->special[id] = port;
 	host_unlock(host_priv);
 
@@ -1409,13 +1413,15 @@ host_security_self(void)
 }
 
 kern_return_t
-host_set_atm_diagnostic_flag(host_priv_t host_priv, uint32_t diagnostic_flag)
+host_set_atm_diagnostic_flag(host_t host, uint32_t diagnostic_flag)
 {
-	if (host_priv == HOST_PRIV_NULL) {
+	if (host == HOST_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	assert(host_priv == &realhost);
+	if (!IOTaskHasEntitlement(current_task(), "com.apple.private.set-atm-diagnostic-flag")) {
+		return KERN_NO_ACCESS;
+	}
 
 #if CONFIG_ATM
 	return atm_set_diagnostic_config(diagnostic_flag);

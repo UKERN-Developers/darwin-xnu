@@ -86,6 +86,17 @@
  * global mappings would be visible to userspace unless we invalidate them on
  * eret.
  */
+#if XNU_MONITOR
+/*
+ * Please note that because we indirect through the thread register in order to
+ * locate the kernel, and because we unmap most of the kernel, the security
+ * model of the PPL is undermined by __ARM_KERNEL_PROTECT__, as we rely on
+ * kernel controlled data to direct codeflow in the exception vectors.
+ *
+ * If we want to ship XNU_MONITOR paired with __ARM_KERNEL_PROTECT__, we will
+ * need to find a performant solution to this problem.
+ */
+#endif
 #endif /* __ARM_KERNEL_PROTECT */
 
 /*
@@ -192,6 +203,7 @@
 #else
 #define PSR64_KERNEL_DEFAULT    PSR64_KERNEL_STANDARD
 #endif
+#define PSR64_KERNEL_POISON     (PSR64_IL | PSR64_MODE_EL1)
 
 #define PSR64_IS_KERNEL(x)      ((x & PSR64_MODE_EL_MASK) > PSR64_MODE_EL0)
 #define PSR64_IS_USER(x)        ((x & PSR64_MODE_EL_MASK) == PSR64_MODE_EL0)
@@ -1485,6 +1497,19 @@ typedef enum {
 #define ISS_FP_IOF_SHIFT 0
 #define ISS_FP_IOF       (0x1 << ISS_FP_IOF_SHIFT)
 
+/*
+ * Breakpoint Exception ISS (EL1)
+ *  24     16          0
+ * +---------+---------+
+ * |000000000| Comment |
+ * +---------+---------+
+ *
+ * where:
+ *   Comment: Instruction Comment Field Value
+ */
+#define ISS_BRK_COMMENT_MASK    0xFFFF
+#define ISS_BRK_COMMENT(x)      (x & ISS_BRK_COMMENT_MASK)
+
 
 /*
  * Physical Address Register (EL1)
@@ -1552,13 +1577,228 @@ typedef enum {
 #define CORESIGHT_REGIONS   4
 #define CORESIGHT_SIZE      0x1000
 
+#if __APRR_SUPPORTED__
+/*
+ * APRR_EL0/APRR_EL1
+ *
+ *  63                 0
+ * +--------------------+
+ * | Attr[15:0]RWX[3:0] |
+ * +--------------------+
+ *
+ * These registers consist of 16 4-bit fields.
+ *
+ * The attribute index consists of the access protection
+ * and execution protections on a mapping.  The index
+ * for a given mapping type is constructed as follows.
+ *
+ * Attribute Index
+ *
+ *     3       2      1     0
+ * +-------+-------+-----+----+
+ * | AP[1] | AP[0] | PXN | XN |
+ * +-------+-------+-----+----+
+ *
+ * The attribute for a given index determines what
+ * protections are disabled for that mappings type
+ * (protections beyond the scope of the standard ARM
+ * protections for a mapping cannot be granted via
+ * APRR).
+ *
+ * Attribute
+ *
+ *       3      2   1   0
+ * +----------+---+---+---+
+ * | Reserved | R | W | X |
+ * +----------+---+---+---+
+ *
+ * Where:
+ *   R: Read is allowed.
+ *   W: Write is allowed.
+ *   X: Execute is allowed.
+ */
+
+#define APRR_IDX_XN  (1ULL)
+#define APRR_IDX_PXN (2ULL)
 
 
+#define APRR_IDX_XN_SHIFT (0ULL)
+#define APRR_IDX_PXN_SHIFT  (1ULL)
+#define APRR_IDX_APSHIFT   (2ULL)
+
+#endif /* __APRR_SUPPORTED__ */
 
 
+#if __APRR_SUPPORTED__
+
+#define APRR_ATTR_X (1ULL)
+#define APRR_ATTR_W (2ULL)
+#define APRR_ATTR_R (4ULL)
+
+#define APRR_ATTR_WX  (APRR_ATTR_W | APRR_ATTR_X)
+#define APRR_ATTR_RX  (APRR_ATTR_R | APRR_ATTR_X)
+#define APRR_ATTR_RWX (APRR_ATTR_R | APRR_ATTR_W | APRR_ATTR_X)
+
+#define APRR_ATTR_NONE (0ULL)
+#define APRR_ATTR_MASK (APRR_ATTR_RWX)
+
+#define APRR_RESERVED_MASK (0x8888888888888888ULL)
+#endif /* __APRR_SUPPORTED__ */
+
+#if __APRR_SUPPORTED__
+#define XPRR_FIRM_RX_PERM  (0ULL)
+#define XPRR_PPL_RW_PERM   (1ULL)
+#define XPRR_FIRM_RO_PERM  (2ULL)
+#define XPRR_KERN_RW_PERM  (3ULL)
+#define XPRR_FIRM_RW_PERM  (4ULL)
+#define XPRR_USER_JIT_PERM (5ULL)
+#define XPRR_KERN0_RW_PERM (6ULL)
+#define XPRR_USER_RW_PERM  (7ULL)
+#define XPRR_PPL_RX_PERM   (8ULL)
+#define XPRR_USER_XO_PERM  (9ULL)
+#define XPRR_KERN_RX_PERM  (10ULL)
+#define XPRR_KERN_RO_PERM  (11ULL)
+#define XPRR_KERN0_RX_PERM (12ULL)
+#define XPRR_USER_RX_PERM  (13ULL)
+#define XPRR_KERN0_RO_PERM (14ULL)
+#define XPRR_USER_RO_PERM  (15ULL)
+#define XPRR_MAX_PERM      (15ULL)
+
+#define XPRR_VERSION_NONE    (0ULL)
+#define XPRR_VERSION_APRR    (1ULL)
 
 
+#endif /* __APRR_SUPPORTED__*/
 
+#if __APRR_SUPPORTED__
+/* Indices for attributes, named based on how we intend to use them. */
+#define APRR_FIRM_RX_INDEX  (0ULL)  /* AP_RWNA, PX, X */
+#define APRR_FIRM_RO_INDEX  (1ULL)  /* AP_RWNA, PX, XN */
+#define APRR_PPL_RW_INDEX   (2ULL)  /* AP_RWNA, PXN, X */
+#define APRR_KERN_RW_INDEX  (3ULL)  /* AP_RWNA, PXN, XN */
+#define APRR_FIRM_RW_INDEX  (4ULL)  /* AP_RWRW, PX, X */
+#define APRR_KERN0_RW_INDEX (5ULL)  /* AP_RWRW, PX, XN */
+#define APRR_USER_JIT_INDEX (6ULL)  /* AP_RWRW, PXN, X */
+#define APRR_USER_RW_INDEX  (7ULL)  /* AP_RWRW, PXN, XN */
+#define APRR_PPL_RX_INDEX   (8ULL)  /* AP_RONA, PX, X */
+#define APRR_KERN_RX_INDEX  (9ULL)  /* AP_RONA, PX, XN */
+#define APRR_USER_XO_INDEX  (10ULL) /* AP_RONA, PXN, X */
+#define APRR_KERN_RO_INDEX  (11ULL) /* AP_RONA, PXN, XN */
+#define APRR_KERN0_RX_INDEX (12ULL) /* AP_RORO, PX, X */
+#define APRR_KERN0_RO_INDEX (13ULL) /* AP_RORO, PX, XN */
+#define APRR_USER_RX_INDEX  (14ULL) /* AP_RORO, PXN, X */
+#define APRR_USER_RO_INDEX  (15ULL) /* AP_RORO, PXN, XN */
+#define APRR_MAX_INDEX      (15ULL) /* For sanity checking index values */
+#endif /* __APRR_SUPPORTED */
+
+
+#if __APRR_SUPPORTED__
+#define APRR_SHIFT_FOR_IDX(x) \
+	((x) << 2ULL)
+
+/* Shifts for attributes, named based on how we intend to use them. */
+#define APRR_FIRM_RX_SHIFT  (0ULL)  /* AP_RWNA, PX, X */
+#define APRR_FIRM_RO_SHIFT  (4ULL)  /* AP_RWNA, PX, XN */
+#define APRR_PPL_RW_SHIFT   (8ULL)  /* AP_RWNA, PXN, X */
+#define APRR_KERN_RW_SHIFT  (12ULL) /* AP_RWNA, PXN, XN */
+#define APRR_FIRM_RW_SHIFT  (16ULL) /* AP_RWRW, PX, X */
+#define APRR_KERN0_RW_SHIFT (20ULL) /* AP_RWRW, PX, XN */
+#define APRR_USER_JIT_SHIFT (24ULL) /* AP_RWRW, PXN, X */
+#define APRR_USER_RW_SHIFT  (28ULL) /* AP_RWRW, PXN, XN */
+#define APRR_PPL_RX_SHIFT   (32ULL) /* AP_RONA, PX, X */
+#define APRR_KERN_RX_SHIFT  (36ULL) /* AP_RONA, PX, XN */
+#define APRR_USER_XO_SHIFT  (40ULL) /* AP_RONA, PXN, X */
+#define APRR_KERN_RO_SHIFT  (44ULL) /* AP_RONA, PXN, XN */
+#define APRR_KERN0_RX_SHIFT (48ULL) /* AP_RORO, PX, X */
+#define APRR_KERN0_RO_SHIFT (52ULL) /* AP_RORO, PX, XN */
+#define APRR_USER_RX_SHIFT  (56ULL) /* AP_RORO, PXN, X */
+#define APRR_USER_RO_SHIFT  (60ULL) /* AP_RORO, PXN, XN */
+
+#define ARM_PTE_APRR_MASK \
+	(ARM_PTE_APMASK | ARM_PTE_PNXMASK | ARM_PTE_NXMASK)
+
+#define ARM_PTE_XPRR_MASK ARM_PTE_APRR_MASK
+
+#define APRR_INDEX_TO_PTE(x) \
+	((pt_entry_t) \
+	 (((x) & 0x8) ? ARM_PTE_AP(0x2) : 0) | \
+	 (((x) & 0x4) ? ARM_PTE_AP(0x1) : 0) | \
+	 (((x) & 0x2) ? ARM_PTE_PNX : 0) | \
+	 (((x) & 0x1) ? ARM_PTE_NX : 0))
+
+#define PTE_TO_APRR_INDEX(x) \
+	((ARM_PTE_EXTRACT_AP(x) << APRR_IDX_APSHIFT) | \
+	(((x) & ARM_PTE_PNXMASK) ? APRR_IDX_PXN : 0) | \
+	(((x) & ARM_PTE_NXMASK) ? APRR_IDX_XN : 0))
+
+#endif /* __APRR_SUPPORTED__ */
+
+#if __APRR_SUPPORTED__
+
+#define APRR_EXTRACT_IDX_ATTR(_aprr_value, _idx) \
+	(((_aprr_value) >> APRR_SHIFT_FOR_IDX(_idx)) & APRR_ATTR_MASK)
+
+#define APRR_REMOVE(x) (~(x))
+
+#define APRR_EL1_UNRESTRICTED (0x4455445566666677ULL)
+
+#define APRR_EL1_RESET \
+	APRR_EL1_UNRESTRICTED
+
+/*
+ * XO mappings bypass PAN protection (rdar://58360875)
+ * Revoke ALL kernel access permissions for XO mappings.
+ */
+#define APRR_EL1_BASE \
+	(APRR_EL1_UNRESTRICTED & \
+	APRR_REMOVE(APRR_ATTR_R << APRR_USER_XO_SHIFT))
+
+#if XNU_MONITOR
+#define APRR_EL1_DEFAULT \
+	(APRR_EL1_BASE & \
+	 (APRR_REMOVE((APRR_ATTR_WX << APRR_PPL_RW_SHIFT) | \
+	 (APRR_ATTR_WX << APRR_USER_XO_SHIFT) | \
+	 (APRR_ATTR_WX << APRR_PPL_RX_SHIFT))))
+
+#define APRR_EL1_PPL \
+	(APRR_EL1_BASE & \
+	 (APRR_REMOVE((APRR_ATTR_X << APRR_PPL_RW_SHIFT) | \
+	 (APRR_ATTR_WX << APRR_USER_XO_SHIFT) | \
+	 (APRR_ATTR_W << APRR_PPL_RX_SHIFT))))
+#else
+#define APRR_EL1_DEFAULT \
+	APRR_EL1_BASE
+#endif
+
+#define APRR_EL0_UNRESTRICTED (0x4545010167670101ULL)
+
+#define APRR_EL0_RESET \
+	APRR_EL0_UNRESTRICTED
+
+#if XNU_MONITOR
+#define APRR_EL0_BASE \
+	(APRR_EL0_UNRESTRICTED & \
+	 (APRR_REMOVE((APRR_ATTR_RWX << APRR_PPL_RW_SHIFT) | \
+	 (APRR_ATTR_RWX << APRR_PPL_RX_SHIFT) | \
+	 (APRR_ATTR_RWX << APRR_USER_XO_SHIFT))))
+#else
+#define APRR_EL0_BASE \
+	APRR_EL0_UNRESTRICTED
+#endif
+
+#define APRR_EL0_JIT_RW \
+	(APRR_EL0_BASE & APRR_REMOVE(APRR_ATTR_X << APRR_USER_JIT_SHIFT))
+
+#define APRR_EL0_JIT_RX \
+	(APRR_EL0_BASE & APRR_REMOVE(APRR_ATTR_W << APRR_USER_JIT_SHIFT))
+
+#define APRR_EL0_JIT_RWX \
+	APRR_EL0_BASE
+
+#define APRR_EL0_DEFAULT \
+	APRR_EL0_BASE
+
+#endif /* __APRR_SUPPORTED__ */
 
 
 /*
@@ -1632,6 +1872,9 @@ typedef enum {
 #define APCTL_EL1_KernKeyEn  (1ULL << 2)
 #endif
 
+#define ACTLR_EL1_DisHWP_OFFSET  3
+#define ACTLR_EL1_DisHWP_MASK    (1ULL << ACTLR_EL1_DisHWP_OFFSET)
+#define ACTLR_EL1_DisHWP         ACTLR_EL1_DisHWP_MASK
 
 
 #if defined(HAS_APPLE_PAC)
@@ -1686,10 +1929,37 @@ cmp  $0, $1
 b.mi $2                         // Unsigned "strictly less than"
 .endmacro
 
+/*
+ * Macro intended to be used as a replacement for ERET.
+ * It prevents speculation past ERET instructions by padding
+ * up to the decoder width.
+ */
+.macro ERET_CONTEXT_SYNCHRONIZING
+eret
+#if __ARM_SB_AVAILABLE__
+sb                              // Technically unnecessary on Apple micro-architectures, may restrict mis-speculation on other architectures
+#else /* __ARM_SB_AVAILABLE__ */
+isb                             // ISB technically unnecessary on Apple micro-architectures, may restrict mis-speculation on other architectures
+nop                             // Sequence of six NOPs to pad out and terminate instruction decode group */
+nop
+nop
+nop
+nop
+nop
+#endif /* !__ARM_SB_AVAILABLE__ */
+.endmacro
+
 #endif /* __ASSEMBLER__ */
 
 #define MSR(reg, src)  __asm__ volatile ("msr " reg ", %0" :: "r" (src))
 #define MRS(dest, reg) __asm__ volatile ("mrs %0, " reg : "=r" (dest))
 
+#if XNU_MONITOR
+#define __ARM_PTE_PHYSMAP__ 1
+#define PPL_STATE_KERNEL    0
+#define PPL_STATE_DISPATCH  1
+#define PPL_STATE_PANIC     2
+#define PPL_STATE_EXCEPTION 3
+#endif
 
 #endif /* _ARM64_PROC_REG_H_ */

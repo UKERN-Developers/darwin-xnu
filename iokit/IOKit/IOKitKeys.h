@@ -69,6 +69,12 @@
 #define kIOProbeScoreKey                "IOProbeScore"
 #define kIOKitDebugKey                  "IOKitDebug"
 
+// Properties to be supported as API
+#define kIOSupportedPropertiesKey       "IOSupportedProperties"
+// Properties writable by dexts
+#define kIOUserServicePropertiesKey     "IOUserServiceProperties"
+
+
 // IOService matching property names
 #define kIOProviderClassKey             "IOProviderClass"
 #define kIONameMatchKey                 "IONameMatch"
@@ -103,6 +109,9 @@
 // Entitlements required to open dext IOUserClient
 // Property is an array of strings containing CFBundleIdentifiers of service being opened
 #define kIODriverKitUserClientEntitlementsKey "com.apple.developer.driverkit.userclient-access"
+
+// Entitlement of a dext that allows any task to open one of its IOUserClients
+#define kIODriverKitUserClientEntitlementAllowAnyKey "com.apple.developer.driverkit.allow-any-userclient-access"
 
 // Other DriverKit entitlements
 #define kIODriverKitUSBTransportEntitlementKey "com.apple.developer.driverkit.transport.usb"

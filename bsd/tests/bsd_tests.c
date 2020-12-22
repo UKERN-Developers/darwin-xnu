@@ -51,6 +51,9 @@ extern kern_return_t arm64_lock_test(void);
 #endif
 kern_return_t kalloc_test(void);
 kern_return_t ipi_test(void);
+#if defined(KERNEL_INTEGRITY_CTRR)
+extern kern_return_t ctrr_test(void);
+#endif
 #if __ARM_PAN_AVAILABLE__
 extern kern_return_t arm64_late_pan_test(void);
 #endif
@@ -62,6 +65,9 @@ extern kern_return_t copyio_test(void);
 struct xnupost_test bsd_post_tests[] = {
 #ifdef __arm64__
 	XNUPOST_TEST_CONFIG_BASIC(arm64_lock_test),
+#endif
+#if defined(KERNEL_INTEGRITY_CTRR)
+	XNUPOST_TEST_CONFIG_BASIC(ctrr_test),
 #endif
 #if __ARM_PAN_AVAILABLE__
 	XNUPOST_TEST_CONFIG_BASIC(arm64_late_pan_test),
@@ -263,7 +269,7 @@ xnupost_export_testdata(void * outp, uint32_t size, uint32_t * lenp)
 	kret = copyout(&version[0], user_addr, length_to_copy);
 	RET_IF_OP_FAIL;
 
-	length_to_copy = MIN((uint32_t)(strlen(PE_boot_args()) + 1), OSVERSIZE);
+	length_to_copy = MIN((uint32_t)(strlen(PE_boot_args()) + 1), BOOT_LINE_LENGTH);
 	kret           = kcdata_get_memory_addr(&kcd, STACKSHOT_KCTYPE_BOOTARGS, length_to_copy, &user_addr);
 	RET_IF_OP_FAIL;
 	kret = copyout(PE_boot_args(), user_addr, length_to_copy);

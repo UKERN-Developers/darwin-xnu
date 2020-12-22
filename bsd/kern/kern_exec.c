@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -144,6 +144,10 @@
 #if CONFIG_MACF
 #include <security/mac_framework.h>
 #include <security/mac_mach_internal.h>
+#endif
+
+#if CONFIG_AUDIT
+#include <bsm/audit_kevents.h>
 #endif
 
 #if CONFIG_ARCADE
@@ -1627,6 +1631,7 @@ encapsulated_binary:
 			 */
 			if (imgp->ip_scriptvp) {
 				vnode_put(imgp->ip_scriptvp);
+				imgp->ip_scriptvp = NULLVP;
 			}
 			if (vnode_getwithref(imgp->ip_vp) == 0) {
 				imgp->ip_scriptvp = imgp->ip_vp;
@@ -1858,6 +1863,7 @@ exec_handle_port_actions(struct image_params *imgp,
 	kern_return_t kr;
 	boolean_t task_has_watchport_boost = task_has_watchports(current_task());
 	boolean_t in_exec = (imgp->ip_flags & IMGPF_EXEC);
+	boolean_t suid_cred_specified = FALSE;
 
 	for (i = 0; i < pacts->pspa_count; i++) {
 		act = &pacts->pspa_actions[i];
@@ -1881,6 +1887,16 @@ exec_handle_port_actions(struct image_params *imgp,
 				goto done;
 			}
 			break;
+
+		case PSPA_SUID_CRED:
+			/* Only a single suid credential can be specified. */
+			if (suid_cred_specified) {
+				ret = EINVAL;
+				goto done;
+			}
+			suid_cred_specified = TRUE;
+			break;
+
 		default:
 			ret = EINVAL;
 			goto done;
@@ -1968,6 +1984,11 @@ exec_handle_port_actions(struct image_params *imgp,
 			/* hold on to this till end of spawn */
 			actions->registered_array[registered_i++] = port;
 			break;
+
+		case PSPA_SUID_CRED:
+			imgp->ip_sc_port = port;
+			break;
+
 		default:
 			ret = EINVAL;
 			break;
@@ -2013,6 +2034,9 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
 	proc_t p = vfs_context_proc(imgp->ip_vfs_context);
 	_posix_spawn_file_actions_t px_sfap = imgp->ip_px_sfa;
 	int ival[2];            /* dummy retval for system calls) */
+#if CONFIG_AUDIT
+	struct uthread *uthread = get_bsdthread_info(current_thread());
+#endif
 
 	for (action = 0; action < px_sfap->psfa_act_count; action++) {
 		_psfa_action_t *psfa = &px_sfap->psfa_act_acts[action];
@@ -2049,6 +2073,8 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
 			mode = ((mode & ~p->p_fd->fd_cmask) & ALLPERMS) & ~S_ISTXT;
 			VATTR_SET(vap, va_mode, mode & ACCESSPERMS);
 
+			AUDIT_SUBCALL_ENTER(OPEN, p, uthread);
+
 			NDINIT(ndp, LOOKUP, OP_OPEN, FOLLOW | AUDITVNPATH1, UIO_SYSSPACE,
 			    CAST_USER_ADDR_T(psfa->psfaa_openargs.psfao_path),
 			    imgp->ip_vfs_context);
@@ -2061,6 +2087,8 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
 			    ival);
 
 			FREE(bufp, M_TEMP);
+
+			AUDIT_SUBCALL_EXIT(uthread, error);
 
 			/*
 			 * If there's an error, or we get the right fd by
@@ -2087,7 +2115,9 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
 			 * can ignore that, since if we didn't get the
 			 * fd we wanted, the error will stop us.
 			 */
+			AUDIT_SUBCALL_ENTER(DUP2, p, uthread);
 			error = dup2(p, &dup2a, ival);
+			AUDIT_SUBCALL_EXIT(uthread, error);
 			if (error) {
 				break;
 			}
@@ -2097,7 +2127,9 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
 			 */
 			ca.fd = origfd;
 
+			AUDIT_SUBCALL_ENTER(CLOSE, p, uthread);
 			error = close_nocancel(p, &ca, ival);
+			AUDIT_SUBCALL_EXIT(uthread, error);
 		}
 		break;
 
@@ -2113,7 +2145,9 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
 			 * can ignore that, since if we didn't get the
 			 * fd we wanted, the error will stop us.
 			 */
+			AUDIT_SUBCALL_ENTER(DUP2, p, uthread);
 			error = dup2(p, &dup2a, ival);
+			AUDIT_SUBCALL_EXIT(uthread, error);
 		}
 		break;
 
@@ -2149,12 +2183,16 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
 
 			dup2a.from = ca.fd = ival[0];
 			dup2a.to = psfa->psfaa_dup2args.psfad_newfiledes;
+			AUDIT_SUBCALL_ENTER(DUP2, p, uthread);
 			error = dup2(p, &dup2a, ival);
+			AUDIT_SUBCALL_EXIT(uthread, error);
 			if (error) {
 				break;
 			}
 
+			AUDIT_SUBCALL_ENTER(CLOSE, p, uthread);
 			error = close_nocancel(p, &ca, ival);
+			AUDIT_SUBCALL_EXIT(uthread, error);
 		}
 		break;
 
@@ -2163,7 +2201,9 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
 
 			ca.fd = psfa->psfaa_filedes;
 
+			AUDIT_SUBCALL_ENTER(CLOSE, p, uthread);
 			error = close_nocancel(p, &ca, ival);
+			AUDIT_SUBCALL_EXIT(uthread, error);
 		}
 		break;
 
@@ -2203,11 +2243,13 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
 			 */
 			struct nameidata nd;
 
+			AUDIT_SUBCALL_ENTER(CHDIR, p, uthread);
 			NDINIT(&nd, LOOKUP, OP_CHDIR, FOLLOW | AUDITVNPATH1, UIO_SYSSPACE,
 			    CAST_USER_ADDR_T(psfa->psfaa_chdirargs.psfac_path),
 			    imgp->ip_vfs_context);
 
 			error = chdir_internal(p, imgp->ip_vfs_context, &nd, 0);
+			AUDIT_SUBCALL_EXIT(uthread, error);
 		}
 		break;
 
@@ -2216,7 +2258,9 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
 
 			fchdira.fd = psfa->psfaa_filedes;
 
+			AUDIT_SUBCALL_ENTER(FCHDIR, p, uthread);
 			error = fchdir(p, &fchdira, ival);
+			AUDIT_SUBCALL_EXIT(uthread, error);
 		}
 		break;
 
@@ -2560,6 +2604,20 @@ proc_legacy_footprint_entitled(proc_t p, task_t task, const char *caller)
 		break;
 	default:
 		break;
+	}
+}
+
+static inline void
+proc_ios13extended_footprint_entitled(proc_t p, task_t task, const char *caller)
+{
+#pragma unused(p, caller)
+	boolean_t ios13extended_footprint_entitled;
+
+	/* the entitlement grants a footprint limit increase */
+	ios13extended_footprint_entitled = IOTaskHasEntitlement(task,
+	    "com.apple.developer.memory.ios13extended_footprint");
+	if (ios13extended_footprint_entitled) {
+		task_set_ios13extended_footprint_limit(task);
 	}
 }
 #endif /* __arm64__ */
@@ -3133,15 +3191,41 @@ do_fork1:
 		 * The POSIX_SPAWN_CLOEXEC_DEFAULT flag
 		 * is handled in exec_handle_file_actions().
 		 */
-		if ((error = exec_handle_file_actions(imgp,
-		    imgp->ip_px_sa != NULL ? px_sa.psa_flags : 0)) != 0) {
+#if CONFIG_AUDIT
+		/*
+		 * The file actions auditing can overwrite the upath of
+		 * AUE_POSIX_SPAWN audit record.  Save the audit record.
+		 */
+		struct kaudit_record *save_uu_ar = uthread->uu_ar;
+		uthread->uu_ar = NULL;
+#endif
+		error = exec_handle_file_actions(imgp,
+		    imgp->ip_px_sa != NULL ? px_sa.psa_flags : 0);
+#if CONFIG_AUDIT
+		/* Restore the AUE_POSIX_SPAWN audit record. */
+		uthread->uu_ar = save_uu_ar;
+#endif
+		if (error != 0) {
 			goto bad;
 		}
 	}
 
 	/* Has spawn port actions? */
 	if (imgp->ip_px_spa != NULL) {
-		if ((error = exec_handle_port_actions(imgp, &port_actions)) != 0) {
+#if CONFIG_AUDIT
+		/*
+		 * Do the same for the port actions as we did for the file
+		 * actions.  Save the AUE_POSIX_SPAWN audit record.
+		 */
+		struct kaudit_record *save_uu_ar = uthread->uu_ar;
+		uthread->uu_ar = NULL;
+#endif
+		error = exec_handle_port_actions(imgp, &port_actions);
+#if CONFIG_AUDIT
+		/* Restore the AUE_POSIX_SPAWN audit record. */
+		uthread->uu_ar = save_uu_ar;
+#endif
+		if (error != 0) {
 			goto bad;
 		}
 	}
@@ -3536,7 +3620,12 @@ bad:
 
 #if __arm64__
 		proc_legacy_footprint_entitled(p, new_task, __FUNCTION__);
+		proc_ios13extended_footprint_entitled(p, new_task, __FUNCTION__);
 #endif /* __arm64__ */
+
+#if __has_feature(ptrauth_calls)
+		task_set_pac_exception_fatal_flag(new_task);
+#endif /* __has_feature(ptrauth_calls) */
 	}
 
 	/* Inherit task role from old task to new task for exec */
@@ -3679,6 +3768,10 @@ bad:
 			imgp->ip_cs_error = OS_REASON_NULL;
 		}
 #endif
+		if (imgp->ip_sc_port != NULL) {
+			ipc_port_release_send(imgp->ip_sc_port);
+			imgp->ip_sc_port = NULL;
+		}
 	}
 
 #if CONFIG_DTRACE
@@ -4207,6 +4300,7 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval)
 
 #if __arm64__
 		proc_legacy_footprint_entitled(p, new_task, __FUNCTION__);
+		proc_ios13extended_footprint_entitled(p, new_task, __FUNCTION__);
 #endif /* __arm64__ */
 
 		/* Sever any extant thread affinity */
@@ -4220,6 +4314,10 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval)
 		thread_t main_thread = imgp->ip_new_thread;
 
 		task_set_main_thread_qos(new_task, main_thread);
+
+#if __has_feature(ptrauth_calls)
+		task_set_pac_exception_fatal_flag(new_task);
+#endif /* __has_feature(ptrauth_calls) */
 
 #if CONFIG_ARCADE
 		/*
@@ -4946,11 +5044,11 @@ exec_add_entropy_key(struct image_params *imgp,
 		entropy[0] &= ~(0xffull << 8);
 	}
 
-	int len = snprintf(str, sizeof(str), "%s0x%llx", key, entropy[0]);
+	int len = scnprintf(str, sizeof(str), "%s0x%llx", key, entropy[0]);
 	int remaining = sizeof(str) - len;
 	for (int i = 1; i < values && remaining > 0; ++i) {
 		int start = sizeof(str) - remaining;
-		len = snprintf(&str[start], remaining, ",0x%llx", entropy[i]);
+		len = scnprintf(&str[start], remaining, ",0x%llx", entropy[i]);
 		remaining -= len;
 	}
 
@@ -5311,7 +5409,8 @@ exec_handle_sugid(struct image_params *imgp)
 	    kauth_cred_getuid(cred) != imgp->ip_origvattr->va_uid) ||
 	    ((imgp->ip_origvattr->va_mode & VSGID) != 0 &&
 	    ((kauth_cred_ismember_gid(cred, imgp->ip_origvattr->va_gid, &leave_sugid_clear) || !leave_sugid_clear) ||
-	    (kauth_cred_getgid(cred) != imgp->ip_origvattr->va_gid)))) {
+	    (kauth_cred_getgid(cred) != imgp->ip_origvattr->va_gid))) ||
+	    (imgp->ip_sc_port != NULL)) {
 #if CONFIG_MACF
 /* label for MAC transition and neither VSUID nor VSGID */
 handle_mac_transition:
@@ -5338,6 +5437,33 @@ handle_mac_transition:
 		 * proc's ucred lock. This prevents others from accessing
 		 * a garbage credential.
 		 */
+
+		if (imgp->ip_sc_port != NULL) {
+			extern int suid_cred_verify(ipc_port_t, vnode_t, uint32_t *);
+			int ret = -1;
+			uid_t uid = UINT32_MAX;
+
+			/*
+			 * Check that the vnodes match. If a script is being
+			 * executed check the script's vnode rather than the
+			 * interpreter's.
+			 */
+			struct vnode *vp = imgp->ip_scriptvp != NULL ? imgp->ip_scriptvp : imgp->ip_vp;
+
+			ret = suid_cred_verify(imgp->ip_sc_port, vp, &uid);
+			if (ret == 0) {
+				apply_kauth_cred_update(p, ^kauth_cred_t (kauth_cred_t my_cred) {
+					return kauth_cred_setresuid(my_cred,
+					KAUTH_UID_NONE,
+					uid,
+					uid,
+					KAUTH_UID_NONE);
+				});
+			} else {
+				error = EPERM;
+			}
+		}
+
 		if (imgp->ip_origvattr->va_mode & VSUID) {
 			apply_kauth_cred_update(p, ^kauth_cred_t (kauth_cred_t my_cred) {
 				return kauth_cred_setresuid(my_cred,

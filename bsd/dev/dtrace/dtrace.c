@@ -10634,18 +10634,35 @@ dtrace_difo_release(dtrace_difo_t *dp, dtrace_vstate_t *vstate)
 /*
  * DTrace Format Functions
  */
+
+static dtrace_format_t*
+dtrace_format_new(char *str)
+{
+	dtrace_format_t *fmt = NULL;
+	size_t bufsize = strlen(str) + 1;
+
+	fmt = kmem_zalloc(sizeof(*fmt) + bufsize, KM_SLEEP);
+
+	fmt->dtf_refcount = 1;
+	(void) strlcpy(fmt->dtf_str, str, bufsize);
+
+	return fmt;
+}
+
 static uint16_t
 dtrace_format_add(dtrace_state_t *state, char *str)
 {
-	char *fmt, **new;
-	uint16_t ndx, len = strlen(str) + 1;
-
-	fmt = kmem_zalloc(len, KM_SLEEP);
-	bcopy(str, fmt, len);
+	dtrace_format_t **new;
+	uint16_t ndx;
 
 	for (ndx = 0; ndx < state->dts_nformats; ndx++) {
 		if (state->dts_formats[ndx] == NULL) {
-			state->dts_formats[ndx] = fmt;
+			state->dts_formats[ndx] = dtrace_format_new(str);
+			return (ndx + 1);
+		}
+		else if (strcmp(state->dts_formats[ndx]->dtf_str, str) == 0) {
+			VERIFY(state->dts_formats[ndx]->dtf_refcount < UINT64_MAX);
+			state->dts_formats[ndx]->dtf_refcount++;
 			return (ndx + 1);
 		}
 	}
@@ -10655,7 +10672,6 @@ dtrace_format_add(dtrace_state_t *state, char *str)
 		 * This is only likely if a denial-of-service attack is being
 		 * attempted.  As such, it's okay to fail silently here.
 		 */
-		kmem_free(fmt, len);
 		return (0);
 	}
 
@@ -10664,16 +10680,16 @@ dtrace_format_add(dtrace_state_t *state, char *str)
 	 * number of formats.
 	 */
 	ndx = state->dts_nformats++;
-	new = kmem_alloc((ndx + 1) * sizeof (char *), KM_SLEEP);
+	new = kmem_alloc((ndx + 1) * sizeof (*state->dts_formats), KM_SLEEP);
 
 	if (state->dts_formats != NULL) {
 		ASSERT(ndx != 0);
-		bcopy(state->dts_formats, new, ndx * sizeof (char *));
-		kmem_free(state->dts_formats, ndx * sizeof (char *));
+		bcopy(state->dts_formats, new, ndx * sizeof (*state->dts_formats));
+		kmem_free(state->dts_formats, ndx * sizeof (*state->dts_formats));
 	}
 
 	state->dts_formats = new;
-	state->dts_formats[ndx] = fmt;
+	state->dts_formats[ndx] = dtrace_format_new(str);
 
 	return (ndx + 1);
 }
@@ -10681,15 +10697,22 @@ dtrace_format_add(dtrace_state_t *state, char *str)
 static void
 dtrace_format_remove(dtrace_state_t *state, uint16_t format)
 {
-	char *fmt;
+	dtrace_format_t *fmt;
 
 	ASSERT(state->dts_formats != NULL);
 	ASSERT(format <= state->dts_nformats);
-	ASSERT(state->dts_formats[format - 1] != NULL);
 
 	fmt = state->dts_formats[format - 1];
-	kmem_free(fmt, strlen(fmt) + 1);
-	state->dts_formats[format - 1] = NULL;
+
+	ASSERT(fmt != NULL);
+	VERIFY(fmt->dtf_refcount > 0);
+
+	fmt->dtf_refcount--;
+
+	if (fmt->dtf_refcount == 0) {
+		kmem_free(fmt, DTRACE_FORMAT_SIZE(fmt));
+		state->dts_formats[format - 1] = NULL;
+	}
 }
 
 static void
@@ -10705,15 +10728,15 @@ dtrace_format_destroy(dtrace_state_t *state)
 	ASSERT(state->dts_formats != NULL);
 
 	for (i = 0; i < state->dts_nformats; i++) {
-		char *fmt = state->dts_formats[i];
+		dtrace_format_t *fmt = state->dts_formats[i];
 
 		if (fmt == NULL)
 			continue;
 
-		kmem_free(fmt, strlen(fmt) + 1);
+		kmem_free(fmt, DTRACE_FORMAT_SIZE(fmt));
 	}
 
-	kmem_free(state->dts_formats, state->dts_nformats * sizeof (char *));
+	kmem_free(state->dts_formats, state->dts_nformats * sizeof (*state->dts_formats));
 	state->dts_nformats = 0;
 	state->dts_formats = NULL;
 }
@@ -18428,7 +18451,7 @@ dtrace_ioctl(dev_t dev, u_long cmd, user_addr_t arg, int md, cred_t *cr, int *rv
 		 * and that the format for the specified index is non-NULL.
 		 */
 		ASSERT(state->dts_formats != NULL);
-		str = state->dts_formats[fmt.dtfd_format - 1];
+		str = state->dts_formats[fmt.dtfd_format - 1]->dtf_str;
 		ASSERT(str != NULL);
 
 		len = strlen(str) + 1;
@@ -18637,7 +18660,7 @@ dtrace_ioctl(dev_t dev, u_long cmd, user_addr_t arg, int md, cred_t *cr, int *rv
 		 * Range check the count. How much data can we pass around?
 		 * FIX ME!
 		 */
-		if (dtmodsyms_count == 0 || (dtmodsyms_count > 100 * 1024)) {
+		if (dtmodsyms_count == 0) {
 			cmn_err(CE_WARN, "dtmodsyms_count is not valid");
 			return (EINVAL);
 		}
@@ -18646,6 +18669,12 @@ dtrace_ioctl(dev_t dev, u_long cmd, user_addr_t arg, int md, cred_t *cr, int *rv
 		 * Allocate a correctly sized structure and copyin the data.
 		 */
 		module_symbols_size = DTRACE_MODULE_SYMBOLS_SIZE(dtmodsyms_count);
+		if (module_symbols_size > (size_t)dtrace_copy_maxsize()) {
+			size_t dtmodsyms_max = DTRACE_MODULE_SYMBOLS_COUNT(dtrace_copy_maxsize());
+			cmn_err(CE_WARN, "dtmodsyms_count %ld is too high, maximum is %ld", dtmodsyms_count, dtmodsyms_max);
+			return (ENOBUFS);
+		}
+
 		if ((module_symbols = kmem_alloc(module_symbols_size, KM_SLEEP)) == NULL) 
 			return (ENOMEM);
 			

@@ -516,7 +516,8 @@ struct _vm_map {
 	/* boolean_t */ map_disallow_new_exec:1,         /* Disallow new executable code */
 	/* boolean_t */ jit_entry_exists:1,
 	/* boolean_t */ has_corpse_footprint:1,
-	/* reserved */ pad:20;
+	/* boolean_t */ terminated:1,
+	/* reserved */ pad:19;
 	unsigned int            timestamp;      /* Version number */
 };
 
@@ -1348,6 +1349,9 @@ extern kern_return_t    vm_map_enter_mem_object_control(
 	vm_prot_t               max_protection,
 	vm_inherit_t            inheritance);
 
+extern kern_return_t    vm_map_terminate(
+	vm_map_t                map);
+
 #endif /* !XNU_KERNEL_PRIVATE */
 
 /* Deallocate a region */
@@ -1373,7 +1377,11 @@ extern kern_return_t    vm_map_copy_overwrite(
 	vm_map_t                dst_map,
 	vm_map_address_t        dst_addr,
 	vm_map_copy_t           copy,
+	vm_map_size_t           copy_size,
 	boolean_t               interruptible);
+
+#define VM_MAP_COPY_OVERWRITE_OPTIMIZATION_THRESHOLD_PAGES      (3)
+
 
 /* returns TRUE if size of vm_map_copy == size parameter FALSE otherwise */
 extern boolean_t        vm_map_copy_validate_size(

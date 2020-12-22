@@ -98,6 +98,10 @@
 
 #include <security/mac_mach_internal.h>
 
+#if CONFIG_CSR
+#include <sys/csr.h>
+#endif
+
 #if CONFIG_EMBEDDED && !SECURE_KERNEL
 extern int cs_relax_platform_task_ports;
 #endif
@@ -132,7 +136,7 @@ ipc_task_init(
 	int i;
 
 
-	kr = ipc_space_create(&ipc_table_entries[0], &space);
+	kr = ipc_space_create(&ipc_table_entries[0], IPC_LABEL_NONE, &space);
 	if (kr != KERN_SUCCESS) {
 		panic("ipc_task_init");
 	}
@@ -868,7 +872,8 @@ mach_reply_port(
 	mach_port_name_t name;
 	kern_return_t kr;
 
-	kr = ipc_port_alloc(current_task()->itk_space, FALSE, &name, &port);
+	kr = ipc_port_alloc(current_task()->itk_space, IPC_PORT_INIT_MESSAGE_QUEUE,
+	    &name, &port);
 	if (kr == KERN_SUCCESS) {
 		ip_unlock(port);
 	} else {
@@ -897,6 +902,8 @@ thread_get_special_reply_port(
 	mach_port_name_t name;
 	kern_return_t kr;
 	thread_t thread = current_thread();
+	ipc_port_init_flags_t flags = IPC_PORT_INIT_MESSAGE_QUEUE |
+	    IPC_PORT_INIT_MAKE_SEND_RIGHT | IPC_PORT_INIT_SPECIAL_REPLY;
 
 	/* unbind the thread special reply port */
 	if (IP_VALID(thread->ith_special_reply_port)) {
@@ -906,7 +913,7 @@ thread_get_special_reply_port(
 		}
 	}
 
-	kr = ipc_port_alloc(current_task()->itk_space, TRUE, &name, &port);
+	kr = ipc_port_alloc(current_task()->itk_space, flags, &name, &port);
 	if (kr == KERN_SUCCESS) {
 		ipc_port_bind_special_reply_port_locked(port);
 		ip_unlock(port);
@@ -932,11 +939,11 @@ ipc_port_bind_special_reply_port_locked(
 {
 	thread_t thread = current_thread();
 	assert(thread->ith_special_reply_port == NULL);
+	assert(port->ip_specialreply);
+	assert(port->ip_sync_link_state == PORT_SYNC_LINK_ANY);
 
 	ip_reference(port);
 	thread->ith_special_reply_port = port;
-	port->ip_specialreply = 1;
-	port->ip_sync_link_state = PORT_SYNC_LINK_ANY;
 	port->ip_messages.imq_srp_owner_thread = thread;
 
 	ipc_special_reply_port_bits_reset(port);
@@ -1165,11 +1172,62 @@ task_get_special_port(
  *		KERN_INVALID_ARGUMENT	The task is null.
  *		KERN_FAILURE		The task/space is dead.
  *		KERN_INVALID_ARGUMENT	Invalid special port.
- *              KERN_NO_ACCESS		Attempted overwrite of seatbelt port.
+ *      KERN_NO_ACCESS		Restricted access to set port.
  */
 
 kern_return_t
 task_set_special_port(
+	task_t          task,
+	int             which,
+	ipc_port_t      port)
+{
+	if (task == TASK_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (task_is_driver(current_task())) {
+		return KERN_NO_ACCESS;
+	}
+
+	switch (which) {
+	case TASK_KERNEL_PORT:
+	case TASK_HOST_PORT:
+#if CONFIG_CSR
+		if (csr_check(CSR_ALLOW_KERNEL_DEBUGGER) == 0) {
+			/*
+			 * Only allow setting of task-self / task-host
+			 * special ports from user-space when SIP is
+			 * disabled (for Mach-on-Mach emulation).
+			 */
+			break;
+		}
+#endif
+		return KERN_NO_ACCESS;
+	default:
+		break;
+	}
+
+	return task_set_special_port_internal(task, which, port);
+}
+
+/*
+ *	Routine:	task_set_special_port_internal
+ *	Purpose:
+ *		Changes one of the task's special ports,
+ *		setting it to the supplied send right.
+ *	Conditions:
+ *		Nothing locked.  If successful, consumes
+ *		the supplied send right.
+ *	Returns:
+ *		KERN_SUCCESS		Changed the special port.
+ *		KERN_INVALID_ARGUMENT	The task is null.
+ *		KERN_FAILURE		The task/space is dead.
+ *		KERN_INVALID_ARGUMENT	Invalid special port.
+ *      KERN_NO_ACCESS		Restricted access to overwrite port.
+ */
+
+kern_return_t
+task_set_special_port_internal(
 	task_t          task,
 	int             which,
 	ipc_port_t      port)
@@ -1179,10 +1237,6 @@ task_set_special_port(
 
 	if (task == TASK_NULL) {
 		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (task_is_driver(current_task())) {
-		return KERN_NO_ACCESS;
 	}
 
 	switch (which) {
@@ -1220,11 +1274,17 @@ task_set_special_port(
 		return KERN_FAILURE;
 	}
 
-	/* do not allow overwrite of seatbelt or task access ports */
-	if ((TASK_SEATBELT_PORT == which || TASK_ACCESS_PORT == which)
-	    && IP_VALID(*whichp)) {
-		itk_unlock(task);
-		return KERN_NO_ACCESS;
+	/* Never allow overwrite of seatbelt, or task access ports */
+	switch (which) {
+	case TASK_SEATBELT_PORT:
+	case TASK_ACCESS_PORT:
+		if (IP_VALID(*whichp)) {
+			itk_unlock(task);
+			return KERN_NO_ACCESS;
+		}
+		break;
+	default:
+		break;
 	}
 
 	old = *whichp;
@@ -1236,7 +1296,6 @@ task_set_special_port(
 	}
 	return KERN_SUCCESS;
 }
-
 
 /*
  *	Routine:	mach_ports_register [kernel call]
@@ -1386,6 +1445,8 @@ mach_ports_lookup(
 	return KERN_SUCCESS;
 }
 
+extern zone_t task_zone;
+
 kern_return_t
 task_conversion_eval(task_t caller, task_t victim)
 {
@@ -1408,6 +1469,8 @@ task_conversion_eval(task_t caller, task_t victim)
 	if (victim == TASK_NULL || victim == kernel_task) {
 		return KERN_INVALID_SECURITY;
 	}
+
+	zone_require(victim, task_zone);
 
 #if CONFIG_EMBEDDED
 	/*
@@ -1453,7 +1516,7 @@ convert_port_to_locked_task(ipc_port_t port)
 			ip_unlock(port);
 			return TASK_NULL;
 		}
-		task = (task_t) port->ip_kobject;
+		task = (task_t) ip_get_kobject(port);
 		assert(task != TASK_NULL);
 
 		if (task_conversion_eval(ct, task)) {
@@ -1499,7 +1562,7 @@ convert_port_to_locked_task_inspect(ipc_port_t port)
 			ip_unlock(port);
 			return TASK_INSPECT_NULL;
 		}
-		task = (task_inspect_t)port->ip_kobject;
+		task = (task_inspect_t) ip_get_kobject(port);
 		assert(task != TASK_INSPECT_NULL);
 		/*
 		 * Normal lock ordering puts task_lock() before ip_lock().
@@ -1529,7 +1592,7 @@ convert_port_to_task_locked(
 
 	if (ip_kotype(port) == IKOT_TASK) {
 		task_t ct = current_task();
-		task = (task_t)port->ip_kobject;
+		task = (task_t) ip_get_kobject(port);
 		assert(task != TASK_NULL);
 
 		if (task_conversion_eval(ct, task)) {
@@ -1611,7 +1674,7 @@ convert_port_to_task_name(
 		if (ip_active(port) &&
 		    (ip_kotype(port) == IKOT_TASK ||
 		    ip_kotype(port) == IKOT_TASK_NAME)) {
-			task = (task_name_t)port->ip_kobject;
+			task = (task_name_t) ip_get_kobject(port);
 			assert(task != TASK_NAME_NULL);
 
 			task_reference_internal(task);
@@ -1633,7 +1696,7 @@ convert_port_to_task_inspect_locked(
 	require_ip_active(port);
 
 	if (ip_kotype(port) == IKOT_TASK) {
-		task = (task_inspect_t)port->ip_kobject;
+		task = (task_inspect_t) ip_get_kobject(port);
 		assert(task != TASK_INSPECT_NULL);
 
 		task_reference_internal(task);
@@ -1688,7 +1751,7 @@ convert_port_to_task_suspension_token(
 
 		if (ip_active(port) &&
 		    ip_kotype(port) == IKOT_TASK_RESUME) {
-			task = (task_suspension_token_t)port->ip_kobject;
+			task = (task_suspension_token_t) ip_get_kobject(port);
 			assert(task != TASK_NULL);
 
 			task_reference_internal(task);
@@ -1822,7 +1885,7 @@ convert_port_to_thread_locked(
 	require_ip_active(port);
 
 	if (ip_kotype(port) == IKOT_THREAD) {
-		thread = (thread_t)port->ip_kobject;
+		thread = (thread_t) ip_get_kobject(port);
 		assert(thread != THREAD_NULL);
 
 		if (options & PORT_TO_THREAD_NOT_CURRENT_THREAD) {
@@ -1885,7 +1948,7 @@ convert_port_to_thread_inspect(
 
 		if (ip_active(port) &&
 		    ip_kotype(port) == IKOT_THREAD) {
-			thread = (thread_inspect_t)port->ip_kobject;
+			thread = (thread_inspect_t) ip_get_kobject(port);
 			assert(thread != THREAD_INSPECT_NULL);
 			thread_reference_internal((thread_t)thread);
 		}

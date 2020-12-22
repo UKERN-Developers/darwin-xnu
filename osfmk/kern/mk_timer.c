@@ -45,6 +45,7 @@
 #include <kern/lock_group.h>
 #include <kern/mk_timer.h>
 #include <kern/thread_call.h>
+#include <ipc/ipc_kmsg.h>
 
 static zone_t           mk_timer_zone;
 
@@ -62,39 +63,48 @@ mach_port_name_t
 mk_timer_create_trap(
 	__unused struct mk_timer_create_trap_args *args)
 {
-	mk_timer_t                      timer;
-	ipc_space_t                     myspace = current_space();
-	mach_port_name_t        name = MACH_PORT_NULL;
-	ipc_port_t                      port;
-	kern_return_t           result;
+	mk_timer_t            timer;
+	ipc_space_t           myspace = current_space();
+	mach_port_name_t      name = MACH_PORT_NULL;
+	ipc_port_init_flags_t init_flags;
+	ipc_port_t            port;
+	kern_return_t         result;
 
+	/* Allocate and initialize local state of a timer object */
 	timer = (mk_timer_t)zalloc(mk_timer_zone);
 	if (timer == NULL) {
 		return MACH_PORT_NULL;
 	}
-
-	result = mach_port_allocate_internal(myspace, MACH_PORT_RIGHT_RECEIVE,
-	    &mk_timer_qos, &name);
-	if (result == KERN_SUCCESS) {
-		result = ipc_port_translate_receive(myspace, name, &port);
-	}
-
-	if (result != KERN_SUCCESS) {
-		zfree(mk_timer_zone, timer);
-
-		return MACH_PORT_NULL;
-	}
-
 	simple_lock_init(&timer->lock, 0);
 	thread_call_setup(&timer->call_entry, mk_timer_expire, timer);
 	timer->is_armed = timer->is_dead = FALSE;
 	timer->active = 0;
 
-	timer->port = port;
+	/* Pre-allocate a kmsg for the timer messages */
+	ipc_kmsg_t kmsg;
+	kmsg = ipc_kmsg_prealloc(mk_timer_qos.len + MAX_TRAILER_SIZE);
+	if (kmsg == IKM_NULL) {
+		zfree(mk_timer_zone, timer);
+		return MACH_PORT_NULL;
+	}
+
+	init_flags = IPC_PORT_INIT_MESSAGE_QUEUE;
+	result = ipc_port_alloc(myspace, init_flags, &name, &port);
+	if (result != KERN_SUCCESS) {
+		zfree(mk_timer_zone, timer);
+		ipc_kmsg_free(kmsg);
+		return MACH_PORT_NULL;
+	}
+
+	/* Associate the pre-allocated kmsg with the port */
+	ipc_kmsg_set_prealloc(kmsg, port);
+
+	/* port locked, receive right at user-space */
 	ipc_kobject_set_atomically(port, (ipc_kobject_t)timer, IKOT_TIMER);
 
-	port->ip_srights++;
-	ip_reference(port);
+	/* make a (naked) send right for the timer to keep */
+	timer->port = ipc_port_make_send_locked(port);
+
 	ip_unlock(port);
 
 	return name;
@@ -108,7 +118,7 @@ mk_timer_port_destroy(
 
 	ip_lock(port);
 	if (ip_kotype(port) == IKOT_TIMER) {
-		timer = (mk_timer_t)port->ip_kobject;
+		timer = (mk_timer_t) ip_get_kobject(port);
 		assert(timer != NULL);
 		ipc_kobject_set_atomically(port, IKO_NULL, IKOT_NONE);
 		simple_lock(&timer->lock, LCK_GRP_NULL);
@@ -263,7 +273,7 @@ mk_timer_arm_trap_internal(mach_port_name_t name, uint64_t expire_time, uint64_t
 	}
 
 	if (ip_kotype(port) == IKOT_TIMER) {
-		timer = (mk_timer_t)port->ip_kobject;
+		timer = (mk_timer_t) ip_get_kobject(port);
 		assert(timer != NULL);
 
 		simple_lock(&timer->lock, LCK_GRP_NULL);
@@ -347,7 +357,7 @@ mk_timer_cancel_trap(
 	}
 
 	if (ip_kotype(port) == IKOT_TIMER) {
-		timer = (mk_timer_t)port->ip_kobject;
+		timer = (mk_timer_t) ip_get_kobject(port);
 		assert(timer != NULL);
 		simple_lock(&timer->lock, LCK_GRP_NULL);
 		assert(timer->port == port);

@@ -138,12 +138,15 @@ extern struct vnode *vnode_pager_lookup_vnode(memory_object_t);
 uint64_t vm_hard_throttle_threshold;
 
 
-
-#define NEED_TO_HARD_THROTTLE_THIS_TASK()       (vm_wants_task_throttled(current_task()) ||     \
-	                                         ((vm_page_free_count < vm_page_throttle_limit || \
-	                                           HARD_THROTTLE_LIMIT_REACHED()) && \
-	                                          proc_get_effective_thread_policy(current_thread(), TASK_POLICY_IO) >= THROTTLE_LEVEL_THROTTLED))
-
+OS_ALWAYS_INLINE
+boolean_t
+NEED_TO_HARD_THROTTLE_THIS_TASK(void)
+{
+	return vm_wants_task_throttled(current_task()) ||
+	       ((vm_page_free_count < vm_page_throttle_limit ||
+	       HARD_THROTTLE_LIMIT_REACHED()) &&
+	       proc_get_effective_thread_policy(current_thread(), TASK_POLICY_IO) >= THROTTLE_LEVEL_THROTTLED);
+}
 
 #define HARD_THROTTLE_DELAY     10000   /* 10000 us == 10 ms */
 #define SOFT_THROTTLE_DELAY     200     /* 200 us == .2 ms */
@@ -2577,7 +2580,12 @@ vm_fault_enter(vm_page_t m,
 	 * from the current map. We do that below right before we do the
 	 * PMAP_ENTER.
 	 */
-	cs_enforcement_enabled = cs_process_enforcement(NULL);
+	if (pmap == kernel_pmap) {
+		/* kernel fault: cs_process_enforcement() does not apply */
+		cs_enforcement_enabled = 0;
+	} else {
+		cs_enforcement_enabled = cs_process_enforcement(NULL);
+	}
 
 	if (cs_enforcement_enabled && map_is_switched &&
 	    map_is_switch_protected && page_immutable(m, prot) &&
@@ -4088,7 +4096,9 @@ FastPmapEnter:
 					}
 
 					KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, event_code, trace_real_vaddr, (fault_info.user_tag << 16) | (caller_prot << 8) | type_of_fault, m->vmp_offset, get_current_unique_pid(), 0);
-
+					if (need_retry == FALSE) {
+						KDBG_FILTERED(MACHDBG_CODE(DBG_MACH_WORKINGSET, VM_REAL_FAULT_FAST), get_current_unique_pid(), 0, 0, 0, 0);
+					}
 					DTRACE_VM6(real_fault, vm_map_offset_t, real_vaddr, vm_map_offset_t, m->vmp_offset, int, event_code, int, caller_prot, int, type_of_fault, int, fault_info.user_tag);
 				}
 				if (kr == KERN_SUCCESS &&
@@ -5087,6 +5097,7 @@ handle_copy_delay:
 			}
 
 			KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, event_code, trace_real_vaddr, (fault_info.user_tag << 16) | (caller_prot << 8) | type_of_fault, m->vmp_offset, get_current_unique_pid(), 0);
+			KDBG_FILTERED(MACHDBG_CODE(DBG_MACH_WORKINGSET, VM_REAL_FAULT_SLOW), get_current_unique_pid(), 0, 0, 0, 0);
 
 			DTRACE_VM6(real_fault, vm_map_offset_t, real_vaddr, vm_map_offset_t, m->vmp_offset, int, event_code, int, caller_prot, int, type_of_fault, int, fault_info.user_tag);
 		}
@@ -6679,7 +6690,7 @@ vm_record_rtfault(thread_t cthread, uint64_t fstart, vm_map_offset_t fault_vaddr
 	uint64_t cupid = get_current_unique_pid();
 
 	uintptr_t bpc = 0;
-	uint32_t bfrs = 0;
+	int btr = 0;
 	bool u64 = false;
 
 	/* Capture a single-frame backtrace; this extracts just the program
@@ -6687,7 +6698,7 @@ vm_record_rtfault(thread_t cthread, uint64_t fstart, vm_map_offset_t fault_vaddr
 	 * further user stack traversals, thus avoiding copyin()s and further
 	 * faults.
 	 */
-	int btr = backtrace_thread_user(cthread, &bpc, 1U, &bfrs, &u64, NULL);
+	unsigned int bfrs = backtrace_thread_user(cthread, &bpc, 1U, &btr, &u64, NULL);
 
 	if ((btr == 0) && (bfrs > 0)) {
 		cfpc = bpc;

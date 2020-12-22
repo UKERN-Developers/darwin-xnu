@@ -122,7 +122,6 @@ struct snprintf_arg {
 extern const char       *debugger_panic_str;
 
 extern  void cnputc(char);              /* standard console putc */
-void    (*v_putc)(char) = cnputc;       /* routine to putc on virtual console */
 
 extern  struct tty cons;                /* standard console tty */
 extern struct   tty *constty;           /* pointer to console "window" tty */
@@ -385,7 +384,7 @@ putchar(int c, void *arg)
 		log_putc_locked(msgbufp, c);
 	}
 	if ((pca->flags & TOCONS) && constty == 0 && c != '\0') {
-		(*v_putc)(c);
+		cnputc(c);
 	}
 	if (pca->flags & TOSTR) {
 		**sp = c;
@@ -463,6 +462,30 @@ vsnprintf(char *str, size_t size, const char *format, va_list ap)
 		*info.str++ = '\0';
 	}
 	return retval;
+}
+
+int
+vscnprintf(char *buf, size_t size, const char *fmt, va_list args)
+{
+	ssize_t ssize = size;
+	int i;
+
+	i = vsnprintf(buf, size, fmt, args);
+
+	return (i >= ssize) ? (ssize - 1) : i;
+}
+
+int
+scnprintf(char *buf, size_t size, const char *fmt, ...)
+{
+	va_list args;
+	int i;
+
+	va_start(args, fmt);
+	i = vscnprintf(buf, size, fmt, args);
+	va_end(args);
+
+	return i;
 }
 
 static void

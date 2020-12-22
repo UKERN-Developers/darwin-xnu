@@ -35,6 +35,7 @@
 
 #include <mach/machine/_structs.h>
 #include <mach/message.h>
+#include <mach/vm_types.h>
 #include <mach/arm/thread_state.h>
 
 /*
@@ -277,6 +278,21 @@ const_thread_state64(const arm_unified_thread_state_t *its)
 
 #define ARM_SAVED_STATE (THREAD_STATE_NONE + 1)
 
+#if __ARM_VFP__
+#define VFPSAVE_ALIGN  16
+#define VFPSAVE_ATTRIB __attribute__((aligned (VFPSAVE_ALIGN)))
+#define THREAD_ALIGN   VFPSAVE_ALIGN
+
+/*
+ * vector floating point saved state
+ */
+struct arm_vfpsaved_state {
+	uint32_t r[64];
+	uint32_t fpscr;
+	uint32_t fpexc;
+};
+#endif
+
 struct arm_saved_state {
 	uint32_t r[13];     /* General purpose register r0-r12 */
 	uint32_t sp;        /* Stack pointer r13 */
@@ -286,6 +302,15 @@ struct arm_saved_state {
 	uint32_t fsr;       /* Fault status */
 	uint32_t far;       /* Virtual Fault Address */
 	uint32_t exception; /* exception number */
+
+#if __ARM_VFP__
+	/* VFP state */
+	struct arm_vfpsaved_state VFPdata VFPSAVE_ATTRIB;
+	// for packing reasons chtread_self and DebugData
+	// are inside the the PcbData when __ARM_VFP__ is set
+	arm_debug_state_t        *VFPpadding_DebugData;
+	vm_address_t              VFPpadding_cthread_self;
+#endif
 };
 typedef struct arm_saved_state arm_saved_state_t;
 
@@ -387,7 +412,7 @@ static inline void
 mask_saved_state_cpsr(arm_saved_state_t *iss, uint32_t set_bits, uint32_t clear_bits)
 {
 	iss->cpsr |= set_bits;
-	iss->cpsr &= clear_bits;
+	iss->cpsr &= ~clear_bits;
 }
 
 static inline void
@@ -479,6 +504,18 @@ typedef struct arm_saved_state arm_saved_state_t;
 
 #if defined(XNU_KERNEL_PRIVATE)
 #if defined(HAS_APPLE_PAC)
+
+#include <sys/cdefs.h>
+
+/*
+ * Used by MANIPULATE_SIGNED_THREAD_STATE(), potentially from C++ (IOKit) code.
+ * Open-coded to prevent a circular dependency between mach/arm/thread_status.h
+ * and osfmk/arm/machine_routines.h.
+ */
+__BEGIN_DECLS
+extern boolean_t ml_set_interrupts_enabled(boolean_t);
+__END_DECLS
+
 /*
  * Methods used to sign and check thread state to detect corruptions of saved
  * thread state across exceptions and context switches.
@@ -506,30 +543,34 @@ extern void ml_check_signed_state(const arm_saved_state_t *, uint64_t, uint32_t,
  * x6: scratch register
  * x7: scratch register
  */
-#define MANIPULATE_SIGNED_THREAD_STATE(_iss, _instr, ...)               \
-	asm volatile (                                                  \
-	        "mov	x8, lr"				"\n"            \
-	        "mov	x0, %[iss]"			"\n"            \
-	        "ldp	x4, x5, [x0, %[SS64_X16]]"	"\n"            \
-	        "ldr	x6, [x0, %[SS64_PC]]"		"\n"            \
-	        "ldr	w7, [x0, %[SS64_CPSR]]"		"\n"            \
-	        "ldr	x3, [x0, %[SS64_LR]]"		"\n"            \
-	        "mov	x1, x6"				"\n"            \
-	        "mov	w2, w7"				"\n"            \
-	        "bl	_ml_check_signed_state"		"\n"            \
-	        "mov	x1, x6"				"\n"            \
-	        "mov	w2, w7"				"\n"            \
-	        _instr					"\n"            \
-	        "bl	_ml_sign_thread_state"		"\n"            \
-	        "mov	lr, x8"				"\n"            \
-	        :                                                       \
-	        : [iss]         "r"(_iss),                              \
-	          [SS64_X16]	"i"(ss64_offsetof(x[16])),              \
-	          [SS64_PC]	"i"(ss64_offsetof(pc)),                 \
-	          [SS64_CPSR]	"i"(ss64_offsetof(cpsr)),               \
-	          [SS64_LR]	"i"(ss64_offsetof(lr)),##__VA_ARGS__    \
-	        : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8"  \
-	)
+#define MANIPULATE_SIGNED_THREAD_STATE(_iss, _instr, ...)                       \
+	do {                                                                    \
+	        boolean_t _intr = ml_set_interrupts_enabled(FALSE);             \
+	        asm volatile (                                                  \
+	                "mov	x8, lr"				"\n"            \
+	                "mov	x0, %[iss]"			"\n"            \
+	                "ldp	x4, x5, [x0, %[SS64_X16]]"	"\n"            \
+	                "ldr	x6, [x0, %[SS64_PC]]"		"\n"            \
+	                "ldr	w7, [x0, %[SS64_CPSR]]"		"\n"            \
+	                "ldr	x3, [x0, %[SS64_LR]]"		"\n"            \
+	                "mov	x1, x6"				"\n"            \
+	                "mov	w2, w7"				"\n"            \
+	                "bl	_ml_check_signed_state"		"\n"            \
+	                "mov	x1, x6"				"\n"            \
+	                "mov	w2, w7"				"\n"            \
+	                _instr					"\n"            \
+	                "bl	_ml_sign_thread_state"		"\n"            \
+	                "mov	lr, x8"				"\n"            \
+	                :                                                       \
+	                : [iss]         "r"(_iss),                              \
+	                  [SS64_X16]	"i"(ss64_offsetof(x[16])),              \
+	                  [SS64_PC]	"i"(ss64_offsetof(pc)),                 \
+	                  [SS64_CPSR]	"i"(ss64_offsetof(cpsr)),               \
+	                  [SS64_LR]	"i"(ss64_offsetof(lr)),##__VA_ARGS__    \
+	                : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8"  \
+	        );                                                              \
+	        ml_set_interrupts_enabled(_intr);                               \
+	} while (0)
 
 static inline void
 check_and_sign_copied_thread_state(arm_saved_state_t *dst, const arm_saved_state_t *src)

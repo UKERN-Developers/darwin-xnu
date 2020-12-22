@@ -122,7 +122,6 @@ main(int     argc,
 	/* These fields are being added on demand */
 	DECLARE("ACT_CONTEXT", offsetof(struct thread, machine.contextData));
 	DECLARE("TH_CTH_SELF", offsetof(struct thread, machine.cthread_self));
-	DECLARE("TH_CTH_DATA", offsetof(struct thread, machine.cthread_data));
 	DECLARE("ACT_PREEMPT_CNT", offsetof(struct thread, machine.preemption_count));
 	DECLARE("ACT_CPUDATAP", offsetof(struct thread, machine.CpuDatap));
 	DECLARE("ACT_DEBUGDATA", offsetof(struct thread, machine.DebugData));
@@ -258,6 +257,14 @@ main(int     argc,
 
 	DECLARE("SR_RESTORE_TCR_EL1", offsetof(struct sysreg_restore, tcr_el1));
 
+#if XNU_MONITOR
+	DECLARE("PMAP_CPU_DATA_PPL_STATE", offsetof(struct pmap_cpu_data, ppl_state));
+	DECLARE("PMAP_CPU_DATA_ARRAY_ENTRY_SIZE", sizeof(struct pmap_cpu_data_array_entry));
+	DECLARE("PMAP_CPU_DATA_PPL_STACK", offsetof(struct pmap_cpu_data, ppl_stack));
+	DECLARE("PMAP_CPU_DATA_KERN_SAVED_SP", offsetof(struct pmap_cpu_data, ppl_kern_saved_sp));
+	DECLARE("PMAP_CPU_DATA_SAVE_AREA", offsetof(struct pmap_cpu_data, save_area));
+	DECLARE("PMAP_COUNT", PMAP_COUNT);
+#endif /* XNU_MONITOR */
 
 
 #if defined(HAS_APPLE_PAC)

@@ -133,6 +133,8 @@
 #include <mach/vfs_nspace.h>
 #include <os/log.h>
 
+#include <nfs/nfs_conf.h>
+
 #if ROUTEFS
 #include <miscfs/routefs/routefs.h>
 #endif /* ROUTEFS */
@@ -209,6 +211,9 @@ struct fd_vn_data * fg_vn_data_alloc(void);
  */
 #define MAX_AUTHORIZE_ENOENT_RETRIES 1024
 
+/* Max retry limit for rename due to vnode recycling. */
+#define MAX_RENAME_ERECYCLE_RETRIES 1024
+
 static int rmdirat_internal(vfs_context_t, int, user_addr_t, enum uio_seg,
     int unlink_flags);
 
@@ -266,7 +271,7 @@ extern errno_t rmdir_remove_orphaned_appleDouble(vnode_t, vfs_context_t, int *);
  * Virtual File System System Calls
  */
 
-#if NFSCLIENT || DEVFS || ROUTEFS
+#if CONFIG_NFS_CLIENT || DEVFS || ROUTEFS
 /*
  * Private in-kernel mounting spi (NFS only, not exported)
  */
@@ -322,7 +327,7 @@ kernel_mount(char *fstype, vnode_t pvp, vnode_t vp, const char *path,
 
 	return error;
 }
-#endif /* NFSCLIENT || DEVFS */
+#endif /* CONFIG_NFS_CLIENT || DEVFS */
 
 /*
  * Mount a file system.
@@ -829,14 +834,14 @@ mount_common(char *fstypename, vnode_t pvp, vnode_t vp,
 	/* XXX 3762912 hack to support HFS filesystem 'owner' - filesystem may update later */
 	vfs_setowner(mp, KAUTH_UID_NONE, KAUTH_GID_NONE);
 
-#if NFSCLIENT || DEVFS || ROUTEFS
+#if CONFIG_NFS_CLIENT || DEVFS || ROUTEFS
 	if (kernelmount) {
 		mp->mnt_kern_flag |= MNTK_KERNEL_MOUNT;
 	}
 	if ((internal_flags & KERNEL_MOUNT_PERMIT_UNMOUNT) != 0) {
 		mp->mnt_kern_flag |= MNTK_PERMIT_UNMOUNT;
 	}
-#endif /* NFSCLIENT || DEVFS */
+#endif /* CONFIG_NFS_CLIENT || DEVFS */
 
 update:
 
@@ -1966,11 +1971,10 @@ checkdirs_callback(proc_t p, void * arg)
 	vnode_t olddp = cdrp->olddp;
 	vnode_t newdp = cdrp->newdp;
 	struct filedesc *fdp;
-	vnode_t tvp;
-	vnode_t fdp_cvp;
-	vnode_t fdp_rvp;
-	int cdir_changed = 0;
-	int rdir_changed = 0;
+	vnode_t new_cvp = newdp;
+	vnode_t new_rvp = newdp;
+	vnode_t old_cvp = NULL;
+	vnode_t old_rvp = NULL;
 
 	/*
 	 * XXX Also needs to iterate each thread in the process to see if it
@@ -1978,36 +1982,70 @@ checkdirs_callback(proc_t p, void * arg)
 	 * XXX update that as well.
 	 */
 
+	/*
+	 * First, with the proc_fdlock held, check to see if we will need
+	 * to do any work.  If not, we will get out fast.
+	 */
 	proc_fdlock(p);
 	fdp = p->p_fd;
-	if (fdp == (struct filedesc *)0) {
+	if (fdp == NULL ||
+	    (fdp->fd_cdir != olddp && fdp->fd_rdir != olddp)) {
 		proc_fdunlock(p);
 		return PROC_RETURNED;
 	}
-	fdp_cvp = fdp->fd_cdir;
-	fdp_rvp = fdp->fd_rdir;
 	proc_fdunlock(p);
 
-	if (fdp_cvp == olddp) {
-		vnode_ref(newdp);
-		tvp = fdp->fd_cdir;
-		fdp_cvp = newdp;
-		cdir_changed = 1;
-		vnode_rele(tvp);
+	/*
+	 * Ok, we will have to do some work.  Always take two refs
+	 * because we might need that many.  We'll dispose of whatever
+	 * we ended up not using.
+	 */
+	if (vnode_ref(newdp) != 0) {
+		return PROC_RETURNED;
 	}
-	if (fdp_rvp == olddp) {
-		vnode_ref(newdp);
-		tvp = fdp->fd_rdir;
-		fdp_rvp = newdp;
-		rdir_changed = 1;
-		vnode_rele(tvp);
+	if (vnode_ref(newdp) != 0) {
+		vnode_rele(newdp);
+		return PROC_RETURNED;
 	}
-	if (cdir_changed || rdir_changed) {
-		proc_fdlock(p);
-		fdp->fd_cdir = fdp_cvp;
-		fdp->fd_rdir = fdp_rvp;
-		proc_fdunlock(p);
+
+	proc_dirs_lock_exclusive(p);
+	/*
+	 * Now do the work.  Note: we dropped the proc_fdlock, so we
+	 * have to do all of the checks again.
+	 */
+	proc_fdlock(p);
+	fdp = p->p_fd;
+	if (fdp != NULL) {
+		if (fdp->fd_cdir == olddp) {
+			old_cvp = olddp;
+			fdp->fd_cdir = newdp;
+			new_cvp = NULL;
+		}
+		if (fdp->fd_rdir == olddp) {
+			old_rvp = olddp;
+			fdp->fd_rdir = newdp;
+			new_rvp = NULL;
+		}
 	}
+	proc_fdunlock(p);
+	proc_dirs_unlock_exclusive(p);
+
+	/*
+	 * Dispose of any references that are no longer needed.
+	 */
+	if (old_cvp != NULL) {
+		vnode_rele(old_cvp);
+	}
+	if (old_rvp != NULL) {
+		vnode_rele(old_rvp);
+	}
+	if (new_cvp != NULL) {
+		vnode_rele(new_cvp);
+	}
+	if (new_rvp != NULL) {
+		vnode_rele(new_rvp);
+	}
+
 	return PROC_RETURNED;
 }
 
@@ -2769,6 +2807,7 @@ quotactl(proc_t p, struct quotactl_args *uap, __unused int32_t *retval)
 		return error;
 	}
 	mp = nd.ni_vp->v_mount;
+	mount_ref(mp, 0);
 	vnode_put(nd.ni_vp);
 	nameidone(&nd);
 
@@ -2843,6 +2882,7 @@ quotactl(proc_t p, struct quotactl_args *uap, __unused int32_t *retval)
 		break;
 	} /* switch */
 
+	mount_drop(mp, 0);
 	return error;
 }
 #else
@@ -3551,10 +3591,12 @@ common_fchdir(proc_t p, struct fchdir_args *uap, int per_thread)
 			return ENOENT;
 		}
 	} else {
+		proc_dirs_lock_exclusive(p);
 		proc_fdlock(p);
 		tvp = fdp->fd_cdir;
 		fdp->fd_cdir = vp;
 		proc_fdunlock(p);
+		proc_dirs_unlock_exclusive(p);
 	}
 
 	if (tvp) {
@@ -3624,10 +3666,12 @@ chdir_internal(proc_t p, vfs_context_t ctx, struct nameidata *ndp, int per_threa
 			return ENOENT;
 		}
 	} else {
+		proc_dirs_lock_exclusive(p);
 		proc_fdlock(p);
 		tvp = fdp->fd_cdir;
 		fdp->fd_cdir = ndp->ni_vp;
 		proc_fdunlock(p);
+		proc_dirs_unlock_exclusive(p);
 	}
 
 	if (tvp) {
@@ -3746,11 +3790,21 @@ chroot(proc_t p, struct chroot_args *uap, __unused int32_t *retval)
 	}
 	vnode_put(nd.ni_vp);
 
+	/*
+	 * This lock provides the guarantee that as long as you hold the lock
+	 * fdp->fd_rdir has a usecount on it. This is used to take an iocount
+	 * on a referenced vnode in namei when determining the rootvnode for
+	 * a process.
+	 */
+	/* needed for synchronization with lookup */
+	proc_dirs_lock_exclusive(p);
+	/* needed for setting the flag and other activities on the fd itself */
 	proc_fdlock(p);
 	tvp = fdp->fd_rdir;
 	fdp->fd_rdir = nd.ni_vp;
 	fdp->fd_flags |= FD_CHROOT;
 	proc_fdunlock(p);
+	proc_dirs_unlock_exclusive(p);
 
 	if (tvp != NULL) {
 		vnode_rele(tvp);
@@ -4160,7 +4214,7 @@ open_extended(proc_t p, struct open_extended_args *uap, int32_t *retval)
 
 	VATTR_INIT(&va);
 	cmode = ((uap->mode & ~fdp->fd_cmask) & ALLPERMS) & ~S_ISTXT;
-	VATTR_SET(&va, va_mode, cmode);
+	VATTR_SET(&va, va_mode, cmode & ACCESSPERMS);
 	if (uap->uid != KAUTH_UID_NONE) {
 		VATTR_SET(&va, va_uid, uap->uid);
 	}
@@ -4748,6 +4802,9 @@ linkat_internal(vfs_context_t ctx, int fd1, user_addr_t path, int fd2,
 
 	error = nameiat(&nd, fd1);
 	if (error) {
+		if (error == EPERM) {
+			printf("XXX 54841485: nameiat() src EPERM\n");
+		}
 		return error;
 	}
 	vp = nd.ni_vp;
@@ -4761,6 +4818,7 @@ linkat_internal(vfs_context_t ctx, int fd1, user_addr_t path, int fd2,
 	if (vp->v_type == VDIR) {
 		if (!ISSET(vp->v_mount->mnt_kern_flag, MNTK_DIR_HARDLINKS)) {
 			error = EPERM;   /* POSIX */
+			printf("XXX 54841485: VDIR EPERM\n");
 			goto out;
 		}
 
@@ -4788,6 +4846,9 @@ linkat_internal(vfs_context_t ctx, int fd1, user_addr_t path, int fd2,
 	nd.ni_dirp = link;
 	error = nameiat(&nd, fd2);
 	if (error != 0) {
+		if (error == EPERM) {
+			printf("XXX 54841485: nameiat() dst EPERM\n");
+		}
 		goto out;
 	}
 	dvp = nd.ni_dvp;
@@ -4795,12 +4856,18 @@ linkat_internal(vfs_context_t ctx, int fd1, user_addr_t path, int fd2,
 
 #if CONFIG_MACF
 	if ((error = mac_vnode_check_link(ctx, dvp, vp, &nd.ni_cnd)) != 0) {
+		if (error == EPERM) {
+			printf("XXX 54841485: mac_vnode_check_link() EPERM\n");
+		}
 		goto out2;
 	}
 #endif
 
 	/* or to anything that kauth doesn't want us to (eg. immutable items) */
 	if ((error = vnode_authorize(vp, NULL, KAUTH_VNODE_LINKTARGET, ctx)) != 0) {
+		if (error == EPERM) {
+			printf("XXX 54841485: vnode_authorize() LINKTARGET EPERM\n");
+		}
 		goto out2;
 	}
 
@@ -4817,12 +4884,18 @@ linkat_internal(vfs_context_t ctx, int fd1, user_addr_t path, int fd2,
 
 	/* authorize creation of the target note */
 	if ((error = vnode_authorize(dvp, NULL, KAUTH_VNODE_ADD_FILE, ctx)) != 0) {
+		if (error == EPERM) {
+			printf("XXX 54841485: vnode_authorize() ADD_FILE EPERM\n");
+		}
 		goto out2;
 	}
 
 	/* and finally make the link */
 	error = VNOP_LINK(vp, dvp, &nd.ni_cnd, ctx);
 	if (error) {
+		if (error == EPERM) {
+			printf("XXX 54841485: VNOP_LINK() EPERM\n");
+		}
 		goto out2;
 	}
 
@@ -5023,16 +5096,16 @@ symlinkat_internal(vfs_context_t ctx, user_addr_t path_data, int fd,
 		error = VNOP_SYMLINK(dvp, &vp, &nd.ni_cnd, &va, path, ctx);
 	}
 
+	/* do fallback attribute handling */
+	if (error == 0 && vp) {
+		error = vnode_setattr_fallback(vp, &va, ctx);
+	}
+
 #if CONFIG_MACF
 	if (error == 0 && vp) {
 		error = vnode_label(vnode_mount(vp), dvp, vp, &nd.ni_cnd, VNODE_LABEL_CREATE, ctx);
 	}
 #endif
-
-	/* do fallback attribute handling */
-	if (error == 0 && vp) {
-		error = vnode_setattr_fallback(vp, &va, ctx);
-	}
 
 	if (error == 0) {
 		int     update_flags = 0;
@@ -7751,10 +7824,6 @@ clonefile_internal(vnode_t fvp, boolean_t data_read_authorised, int dst_dirfd,
 		int fsevent;
 #endif /* CONFIG_FSE */
 
-#if CONFIG_MACF
-		(void)vnode_label(vnode_mount(tvp), tdvp, tvp, cnp,
-		    VNODE_LABEL_CREATE, ctx);
-#endif
 		/*
 		 * If some of the requested attributes weren't handled by the
 		 * VNOP, use our fallback code.
@@ -7762,6 +7831,11 @@ clonefile_internal(vnode_t fvp, boolean_t data_read_authorised, int dst_dirfd,
 		if (!VATTR_ALL_SUPPORTED(&va)) {
 			(void)vnode_setattr_fallback(tvp, &nva, ctx);
 		}
+
+#if CONFIG_MACF
+		(void)vnode_label(vnode_mount(tvp), tdvp, tvp, cnp,
+		    VNODE_LABEL_CREATE, ctx);
+#endif
 
 		// Make sure the name & parent pointers are hooked up
 		if (tvp->v_name == NULL) {
@@ -8423,7 +8497,13 @@ skipped_lookup:
 		 * but other filesystems susceptible to this race could return it, too.
 		 */
 		if (error == ERECYCLE) {
-			do_retry = 1;
+			if (retry_count < MAX_RENAME_ERECYCLE_RETRIES) {
+				do_retry = 1;
+				retry_count += 1;
+			} else {
+				printf("rename retry limit due to ERECYCLE reached\n");
+				error = ENOENT;
+			}
 		}
 
 		/*
@@ -12687,7 +12767,9 @@ static int
 snapshot_mount(int dirfd, user_addr_t name, user_addr_t directory,
     __unused user_addr_t mnt_data, __unused uint32_t flags, vfs_context_t ctx)
 {
+	mount_t mp;
 	vnode_t rvp, snapdvp, snapvp, vp, pvp;
+	struct fs_snapshot_mount_args smnt_data;
 	int error;
 	struct nameidata *snapndp, *dirndp;
 	/* carving out a chunk for structs that are too big to be on stack. */
@@ -12723,20 +12805,28 @@ snapshot_mount(int dirfd, user_addr_t name, user_addr_t directory,
 
 	vp = dirndp->ni_vp;
 	pvp = dirndp->ni_dvp;
+	mp = vnode_mount(rvp);
 
 	if ((vp->v_flag & VROOT) && (vp->v_mount->mnt_flag & MNT_ROOTFS)) {
 		error = EINVAL;
-	} else {
-		mount_t mp = vnode_mount(rvp);
-		struct fs_snapshot_mount_args smnt_data;
-
-		smnt_data.sm_mp  = mp;
-		smnt_data.sm_cnp = &snapndp->ni_cnd;
-		error = mount_common(mp->mnt_vfsstat.f_fstypename, pvp, vp,
-		    &dirndp->ni_cnd, CAST_USER_ADDR_T(&smnt_data), flags & MNT_DONTBROWSE,
-		    KERNEL_MOUNT_SNAPSHOT, NULL, FALSE, ctx);
+		goto out2;
 	}
 
+#if CONFIG_MACF
+	error = mac_mount_check_snapshot_mount(ctx, rvp, vp, &dirndp->ni_cnd, snapndp->ni_cnd.cn_nameptr,
+	    mp->mnt_vfsstat.f_fstypename);
+	if (error) {
+		goto out2;
+	}
+#endif
+
+	smnt_data.sm_mp  = mp;
+	smnt_data.sm_cnp = &snapndp->ni_cnd;
+	error = mount_common(mp->mnt_vfsstat.f_fstypename, pvp, vp,
+	    &dirndp->ni_cnd, CAST_USER_ADDR_T(&smnt_data), flags & MNT_DONTBROWSE,
+	    KERNEL_MOUNT_SNAPSHOT, NULL, FALSE, ctx);
+
+out2:
 	vnode_put(vp);
 	vnode_put(pvp);
 	nameidone(dirndp);

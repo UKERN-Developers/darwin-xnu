@@ -30,6 +30,71 @@
 #include <pexpert/arm64/board_config.h>
 #endif
 
+#if XNU_MONITOR
+/* Exit path defines; for controlling PPL -> kernel transitions. */
+#define PPL_EXIT_DISPATCH   0 /* This is a clean exit after a PPL request. */
+#define PPL_EXIT_PANIC_CALL 1 /* The PPL has called panic. */
+#define PPL_EXIT_BAD_CALL   2 /* The PPL request failed. */
+#define PPL_EXIT_EXCEPTION  3 /* The PPL took an exception. */
+
+#define KERNEL_MODE_ELR      ELR_GL11
+#define KERNEL_MODE_FAR      FAR_GL11
+#define KERNEL_MODE_ESR      ESR_GL11
+#define KERNEL_MODE_SPSR     SPSR_GL11
+#define KERNEL_MODE_ASPSR    ASPSR_GL11
+#define KERNEL_MODE_VBAR     VBAR_GL11
+#define KERNEL_MODE_TPIDR    TPIDR_GL11
+
+#define GUARDED_MODE_ELR     ELR_EL1
+#define GUARDED_MODE_FAR     FAR_EL1
+#define GUARDED_MODE_ESR     ESR_EL1
+#define GUARDED_MODE_SPSR    SPSR_EL1
+#define GUARDED_MODE_ASPSR   ASPSR_EL1
+#define GUARDED_MODE_VBAR    VBAR_EL1
+#define GUARDED_MODE_TPIDR   TPIDR_EL1
+
+/*
+ * GET_PMAP_CPU_DATA
+ *
+ * Retrieves the PPL per-CPU data for the current CPU.
+ *   arg0 - Address of the PPL per-CPU data is returned through this
+ *   arg1 - Scratch register
+ *   arg2 - Scratch register
+ *
+ */
+.macro GET_PMAP_CPU_DATA
+/* Get the CPU ID. */
+mrs		$0, MPIDR_EL1
+#ifdef CPU_CLUSTER_OFFSETS
+ubfx		$1, $0, MPIDR_AFF1_SHIFT, MPIDR_AFF1_WIDTH
+cmp		$1, __ARM_CLUSTER_COUNT__
+b.hs	.
+adrp	$2, EXT(pmap_cluster_offsets)@page
+add		$2, $2, EXT(pmap_cluster_offsets)@pageoff
+ldr		$1, [$2, $1, lsl #3]
+and		$0, $0, MPIDR_AFF0_MASK
+add		$0, $0, $1
+#else
+and		$0, $0, MPIDR_AFF0_MASK
+#endif
+
+/* Get the PPL CPU data array. */
+adrp	$1, EXT(pmap_cpu_data_array)@page
+add		$1, $1, EXT(pmap_cpu_data_array)@pageoff
+
+/*
+ * Sanity check the CPU ID (this is not a panic because this pertains to
+ * the hardware configuration; this should only fail if our
+ * understanding of the hardware is incorrect).
+ */
+cmp		$0, MAX_CPUS
+b.hs	.
+
+mov		$2, PMAP_CPU_DATA_ARRAY_ENTRY_SIZE
+/* Get the PPL per-CPU data. */
+madd	$0, $0, $2, $1
+.endmacro
+#endif /* XNU_MONITOR */
 
 /*
  * INIT_SAVED_STATE_FLAVORS
@@ -52,7 +117,7 @@ str		$1, [$0, NS_COUNT]
 /*
  * SPILL_REGISTERS
  *
- * Spills the current set of registers (excluding x0, x1, sp, fp) to the specified
+ * Spills the current set of registers (excluding x0, x1, sp) to the specified
  * save area.
  *   x0 - Address of the save area
  */
@@ -71,7 +136,8 @@ stp		x20, x21, [x0, SS64_X20]
 stp		x22, x23, [x0, SS64_X22]
 stp		x24, x25, [x0, SS64_X24]
 stp		x26, x27, [x0, SS64_X26]
-str		x28, [x0, SS64_X28]
+stp		x28, fp, [x0, SS64_X28]
+str		lr, [x0, SS64_LR]
 
 /* Save arm_neon_saved_state64 */
 
@@ -92,7 +158,7 @@ stp		q26, q27, [x0, NS64_Q26]
 stp		q28, q29, [x0, NS64_Q28]
 stp		q30, q31, [x0, NS64_Q30]
 
-mrs		lr, ELR_EL1                                                     // Get exception link register
+mrs		x22, ELR_EL1                                                     // Get exception link register
 mrs		x23, SPSR_EL1                                                   // Load CPSR into var reg x23
 mrs		x24, FPSR
 mrs		x25, FPCR
@@ -112,9 +178,9 @@ mov		x20, lr
  * Arg4: The X16 value to sign
  * Arg5: The X17 value to sign
  */
-mov		x1, lr
+mov		x1, x22
 mov		w2, w23
-ldr		x3, [x0, SS64_LR]
+mov		x3, x20
 mov		x4, x16
 mov		x5, x17
 bl		_ml_sign_thread_state
@@ -123,7 +189,7 @@ mov		lr, x20
 mov		x1, x21
 #endif /* defined(HAS_APPLE_PAC) */
 
-str		lr, [x0, SS64_PC]                                               // Save ELR to PCB
+str		x22, [x0, SS64_PC]                                               // Save ELR to PCB
 str		w23, [x0, SS64_CPSR]                                    // Save CPSR to PCB
 str		w24, [x0, NS64_FPSR]
 str		w25, [x0, NS64_FPCR]

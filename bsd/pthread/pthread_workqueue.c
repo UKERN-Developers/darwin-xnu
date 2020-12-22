@@ -461,7 +461,7 @@ workq_thread_needs_params_change(workq_threadreq_t req, struct uthread *uth)
 		return true;
 	}
 
-	if ((req_flags & TRP_POLICY) && cur_trp.trp_pol != cur_trp.trp_pol) {
+	if ((req_flags & TRP_POLICY) && req_trp.trp_pol != cur_trp.trp_pol) {
 		return true;
 	}
 
@@ -1878,6 +1878,7 @@ done:
 		return fixedpri_rv;
 	}
 
+
 	return 0;
 }
 
@@ -3126,9 +3127,8 @@ again:
 		 */
 		wq->wq_creator = uth = workq_pop_idle_thread(wq, UT_WORKQ_OVERCOMMIT,
 		    &needs_wakeup);
-		if (workq_thread_needs_priority_change(req, uth)) {
-			workq_thread_reset_pri(wq, uth, req, /*unpark*/ true);
-		}
+		/* Always reset the priorities on the newly chosen creator */
+		workq_thread_reset_pri(wq, uth, req, /*unpark*/ true);
 		workq_turnstile_update_inheritor(wq, uth->uu_thread,
 		    TURNSTILE_INHERITOR_THREAD);
 		WQ_TRACE_WQ(TRACE_wq_creator_select | DBG_FUNC_NONE,
@@ -3239,6 +3239,8 @@ workq_select_threadreq_or_park_and_unlock(proc_t p, struct workqueue *wq,
 
 	workq_thread_reset_pri(wq, uth, req, /*unpark*/ true);
 
+	thread_unfreeze_base_pri(uth->uu_thread);
+#if 0 // <rdar://problem/55259863> to turn this back on
 	if (__improbable(thread_unfreeze_base_pri(uth->uu_thread) && !is_creator)) {
 		if (req_ts) {
 			workq_perform_turnstile_operation_locked(wq, ^{
@@ -3251,6 +3253,7 @@ workq_select_threadreq_or_park_and_unlock(proc_t p, struct workqueue *wq,
 		WQ_TRACE_WQ(TRACE_wq_select_threadreq | DBG_FUNC_NONE, wq, 3, 0, 0, 0);
 		goto park_thawed;
 	}
+#endif
 
 	/*
 	 * We passed all checks, dequeue the request, bind to it, and set it up
@@ -3321,7 +3324,9 @@ workq_select_threadreq_or_park_and_unlock(proc_t p, struct workqueue *wq,
 
 park:
 	thread_unfreeze_base_pri(uth->uu_thread);
+#if 0 // <rdar://problem/55259863>
 park_thawed:
+#endif
 	workq_park_and_unlock(p, wq, uth, setup_flags);
 }
 

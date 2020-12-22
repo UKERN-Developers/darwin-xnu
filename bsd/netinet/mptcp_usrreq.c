@@ -222,7 +222,7 @@ out:
 }
 
 static int
-mptcp_entitlement_check(struct socket *mp_so)
+mptcp_entitlement_check(struct socket *mp_so, uint8_t svctype)
 {
 	struct mptses *mpte = mpsotompte(mp_so);
 
@@ -254,7 +254,7 @@ mptcp_entitlement_check(struct socket *mp_so)
 	}
 #endif
 
-	if (mpte->mpte_svctype == MPTCP_SVCTYPE_AGGREGATE) {
+	if (svctype == MPTCP_SVCTYPE_AGGREGATE) {
 		if (mptcp_developer_mode) {
 			return 0;
 		}
@@ -274,7 +274,7 @@ mptcp_entitlement_check(struct socket *mp_so)
 
 deny:
 	os_log_error(mptcp_log_handle, "%s - %lx: MPTCP prohibited on svc %u\n",
-	    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte), mpte->mpte_svctype);
+	    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte), svctype);
 
 	return -1;
 }
@@ -354,7 +354,7 @@ mptcp_usr_connectx(struct socket *mp_so, struct sockaddr *src,
 	}
 
 	if (!(mpte->mpte_flags & MPTE_SVCTYPE_CHECKED)) {
-		if (mptcp_entitlement_check(mp_so) < 0) {
+		if (mptcp_entitlement_check(mp_so, mpte->mpte_svctype) < 0) {
 			error = EPERM;
 			goto out;
 		}
@@ -1414,6 +1414,7 @@ mptcp_usr_socheckopt(struct socket *mp_so, struct sockopt *sopt)
 	case SO_NOADDRERR:                      /* MP */
 	case SO_LABEL:                          /* MP */
 	case SO_PEERLABEL:                      /* MP */
+	case SO_DEFUNCTIT:                      /* MP */
 	case SO_DEFUNCTOK:                      /* MP */
 	case SO_ISDEFUNCT:                      /* MP */
 	case SO_TRAFFIC_CLASS_DBG:              /* MP */
@@ -1712,13 +1713,12 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 				goto err_out;
 			}
 
-			mpte->mpte_svctype = optval;
-
-			if (mptcp_entitlement_check(mp_so) < 0) {
+			if (mptcp_entitlement_check(mp_so, optval) < 0) {
 				error = EACCES;
 				goto err_out;
 			}
 
+			mpte->mpte_svctype = optval;
 			mpte->mpte_flags |= MPTE_SVCTYPE_CHECKED;
 
 			goto out;
@@ -2185,6 +2185,8 @@ mptcp_sopt2str(int level, int optname)
 			return "SO_TRAFFIC_CLASS_DBG";
 		case SO_PRIVILEGED_TRAFFIC_CLASS:
 			return "SO_PRIVILEGED_TRAFFIC_CLASS";
+		case SO_DEFUNCTIT:
+			return "SO_DEFUNCTIT";
 		case SO_DEFUNCTOK:
 			return "SO_DEFUNCTOK";
 		case SO_ISDEFUNCT:

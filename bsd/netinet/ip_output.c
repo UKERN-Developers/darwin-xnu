@@ -1261,6 +1261,9 @@ sendit:
 		necp_mark_packet_from_ip(m, necp_matched_policy_id);
 		switch (necp_result) {
 		case NECP_KERNEL_POLICY_RESULT_PASS:
+			if (necp_result_parameter.pass_flags & NECP_KERNEL_POLICY_PASS_NO_SKIP_IPSEC) {
+				break;
+			}
 			/* Check if the interface is allowed */
 			if (!necp_packet_is_allowed_over_interface(m, ifp)) {
 				error = EHOSTUNREACH;
@@ -3074,7 +3077,7 @@ ip_pcbopts(int optname, struct mbuf **pcbopt, struct mbuf *m)
 			ovbcopy((caddr_t)(&cp[IPOPT_OFFSET + 1] +
 			    sizeof(struct in_addr)),
 			    (caddr_t)&cp[IPOPT_OFFSET + 1],
-			    (unsigned)cnt + sizeof(struct in_addr));
+			    (unsigned)cnt - (IPOPT_MINOFF - 1));
 			break;
 		}
 	}

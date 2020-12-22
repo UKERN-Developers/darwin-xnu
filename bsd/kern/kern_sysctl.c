@@ -139,6 +139,8 @@
 #include <machine/machine_routines.h>
 #include <machine/exec.h>
 
+#include <nfs/nfs_conf.h>
+
 #include <vm/vm_protos.h>
 #include <vm/vm_pageout.h>
 #include <vm/vm_compressor_algorithms.h>
@@ -232,7 +234,7 @@ fill_user32_proc(proc_t, struct user32_kinfo_proc *__restrict);
 
 extern int
 kdbg_control(int *name, u_int namelen, user_addr_t where, size_t * sizep);
-#if NFSCLIENT
+#if CONFIG_NFS_CLIENT
 extern int
 netboot_root(void);
 #endif
@@ -282,7 +284,7 @@ STATIC int sysctl_hostname(struct sysctl_oid *oidp, void *arg1, int arg2, struct
 STATIC int sysctl_procname(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req);
 STATIC int sysctl_boottime(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req);
 STATIC int sysctl_symfile(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req);
-#if NFSCLIENT
+#if CONFIG_NFS_CLIENT
 STATIC int sysctl_netboot(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req);
 #endif
 #ifdef CONFIG_IMGSRC_ACCESS
@@ -1087,7 +1089,6 @@ fill_user32_externproc(proc_t p, struct user32_extern_proc *__restrict exp)
 	exp->p_pid = p->p_pid;
 	exp->p_oppid = p->p_oppid;
 	/* Mach related  */
-	exp->user_stack = p->user_stack;
 	exp->p_debugger = p->p_debugger;
 	exp->sigwait = p->sigwait;
 	/* scheduling */
@@ -1140,7 +1141,6 @@ fill_user64_externproc(proc_t p, struct user64_extern_proc *__restrict exp)
 	exp->p_pid = p->p_pid;
 	exp->p_oppid = p->p_oppid;
 	/* Mach related  */
-	exp->user_stack = p->user_stack;
 	exp->p_debugger = p->p_debugger;
 	exp->sigwait = p->sigwait;
 	/* scheduling */
@@ -1465,7 +1465,7 @@ sysctl_procargsx(int *name, u_int namelen, user_addr_t where,
 
 	if (vm_map_copy_overwrite(kernel_map,
 	    (vm_map_address_t)copy_start,
-	    tmp, FALSE) != KERN_SUCCESS) {
+	    tmp, (vm_map_size_t) arg_size, FALSE) != KERN_SUCCESS) {
 		kmem_free(kernel_map, copy_start,
 		    round_page(arg_size));
 		vm_map_copy_discard(tmp);
@@ -2132,6 +2132,28 @@ SYSCTL_PROC(_kern_perfcontrol_callout, OID_AUTO, update_cycles,
     (void *)PERFCONTROL_STAT_CYCLES, PERFCONTROL_CALLOUT_STATE_UPDATE,
     sysctl_perfcontrol_callout_stat, "I", "");
 
+#if __AMP__
+extern int sched_amp_idle_steal;
+SYSCTL_INT(_kern, OID_AUTO, sched_amp_idle_steal,
+    CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+    &sched_amp_idle_steal, 0, "");
+extern int sched_amp_spill_steal;
+SYSCTL_INT(_kern, OID_AUTO, sched_amp_spill_steal,
+    CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+    &sched_amp_spill_steal, 0, "");
+extern int sched_amp_spill_count;
+SYSCTL_INT(_kern, OID_AUTO, sched_amp_spill_count,
+    CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+    &sched_amp_spill_count, 0, "");
+extern int sched_amp_spill_deferred_ipi;
+SYSCTL_INT(_kern, OID_AUTO, sched_amp_spill_deferred_ipi,
+    CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+    &sched_amp_spill_deferred_ipi, 0, "");
+extern int sched_amp_pcores_preempt_immediate_ipi;
+SYSCTL_INT(_kern, OID_AUTO, sched_amp_pcores_preempt_immediate_ipi,
+    CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+    &sched_amp_pcores_preempt_immediate_ipi, 0, "");
+#endif /* __AMP__ */
 #endif /* __arm__ || __arm64__ */
 
 #if __arm64__
@@ -2325,7 +2347,7 @@ SYSCTL_PROC(_kern, KERN_SYMFILE, symfile,
     CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, sysctl_symfile, "A", "");
 
-#if NFSCLIENT
+#if CONFIG_NFS_CLIENT
 STATIC int
 sysctl_netboot
 (__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
@@ -3443,7 +3465,7 @@ SYSCTL_PROC(_kern, OID_AUTO, slide,
  *
  * vm_global_user_wire_limit - system wide limit on wired memory from all processes combined.
  *
- * vm_user_wire_limit - per address space limit on wired memory.  This puts a cap on the process's rlimit value.
+ * vm_per_task_user_wire_limit - per address space limit on wired memory.  This puts a cap on the process's rlimit value.
  *
  * These values are initialized to reasonable defaults at boot time based on the available physical memory in
  * kmem_init().
@@ -3451,22 +3473,56 @@ SYSCTL_PROC(_kern, OID_AUTO, slide,
  * All values are in bytes.
  */
 
-vm_map_size_t   vm_global_no_user_wire_amount;
 vm_map_size_t   vm_global_user_wire_limit;
-vm_map_size_t   vm_user_wire_limit;
+vm_map_size_t   vm_per_task_user_wire_limit;
+extern uint64_t max_mem;
 
+/*
+ * We used to have a global in the kernel called vm_global_no_user_wire_limit which was the inverse
+ * of vm_global_user_wire_limit. But maintaining both of those is silly, and vm_global_user_wire_limit is the
+ * real limit.
+ * This function is for backwards compatibility with userspace
+ * since we exposed the old global via a sysctl.
+ */
+STATIC int
+sysctl_global_no_user_wire_amount(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	vm_map_size_t old_value;
+	vm_map_size_t new_value;
+	int changed;
+	int error;
+
+	old_value = max_mem - vm_global_user_wire_limit;
+	error = sysctl_io_number(req, old_value, sizeof(vm_map_size_t), &new_value, &changed);
+	if (changed) {
+		if ((uint64_t)new_value > max_mem) {
+			error = EINVAL;
+		} else {
+			vm_global_user_wire_limit = max_mem - new_value;
+		}
+	}
+	return error;
+}
 /*
  * There needs to be a more automatic/elegant way to do this
  */
 #if defined(__ARM__)
-SYSCTL_INT(_vm, OID_AUTO, global_no_user_wire_amount, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_global_no_user_wire_amount, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, global_user_wire_limit, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_global_user_wire_limit, 0, "");
-SYSCTL_INT(_vm, OID_AUTO, user_wire_limit, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_user_wire_limit, 0, "");
+SYSCTL_INT(_vm, OID_AUTO, user_wire_limit, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_per_task_user_wire_limit, 0, "");
+SYSCTL_PROC(_vm, OID_AUTO, global_no_user_wire_amount, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0, &sysctl_global_no_user_wire_amount, "I", "");
 #else
-SYSCTL_QUAD(_vm, OID_AUTO, global_no_user_wire_amount, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_global_no_user_wire_amount, "");
 SYSCTL_QUAD(_vm, OID_AUTO, global_user_wire_limit, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_global_user_wire_limit, "");
-SYSCTL_QUAD(_vm, OID_AUTO, user_wire_limit, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_user_wire_limit, "");
+SYSCTL_QUAD(_vm, OID_AUTO, user_wire_limit, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_per_task_user_wire_limit, "");
+SYSCTL_PROC(_vm, OID_AUTO, global_no_user_wire_amount, CTLTYPE_QUAD | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0, &sysctl_global_no_user_wire_amount, "Q", "");
 #endif
+
+#if DEVELOPMENT || DEBUG
+/* These sysyctls are used to test the wired limit. */
+extern unsigned int    vm_page_wire_count;
+extern uint32_t        vm_lopage_free_count;
+SYSCTL_INT(_vm, OID_AUTO, page_wire_count, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_page_wire_count, 0, "");
+SYSCTL_INT(_vm, OID_AUTO, lopage_free_count, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_lopage_free_count, 0, "");
+#endif /* DEVELOPMENT */
 
 extern int vm_map_copy_overwrite_aligned_src_not_internal;
 extern int vm_map_copy_overwrite_aligned_src_not_symmetric;
@@ -3598,6 +3654,9 @@ SYSCTL_INT(_vm, OID_AUTO, compressor_mode, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_comp
 SYSCTL_INT(_vm, OID_AUTO, compressor_is_active, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_compressor_is_active, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, compressor_swapout_target_age, CTLFLAG_RD | CTLFLAG_LOCKED, &swapout_target_age, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, compressor_available, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_compressor_available, 0, "");
+
+extern int min_csegs_per_major_compaction;
+SYSCTL_INT(_vm, OID_AUTO, compressor_min_csegs_per_major_compaction, CTLFLAG_RW | CTLFLAG_LOCKED, &min_csegs_per_major_compaction, 0, "");
 
 SYSCTL_INT(_vm, OID_AUTO, vm_ripe_target_age_in_secs, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_ripe_target_age, 0, "");
 
@@ -4384,6 +4443,41 @@ SYSCTL_PROC(_kern, OID_AUTO, grade_cputype,
 
 #if DEVELOPMENT || DEBUG
 
+extern void do_cseg_wedge_thread(void);
+extern void do_cseg_unwedge_thread(void);
+
+static int
+cseg_wedge_thread SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+
+	int error, val = 0;
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	if (error || val == 0) {
+		return error;
+	}
+
+	do_cseg_wedge_thread();
+	return 0;
+}
+SYSCTL_PROC(_kern, OID_AUTO, cseg_wedge_thread, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0, cseg_wedge_thread, "I", "wedge c_seg thread");
+
+static int
+cseg_unwedge_thread SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+
+	int error, val = 0;
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	if (error || val == 0) {
+		return error;
+	}
+
+	do_cseg_unwedge_thread();
+	return 0;
+}
+SYSCTL_PROC(_kern, OID_AUTO, cseg_unwedge_thread, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0, cseg_unwedge_thread, "I", "unstuck c_seg thread");
+
 static atomic_int wedge_thread_should_wake = 0;
 
 static int
@@ -4432,6 +4526,22 @@ wedge_thread SYSCTL_HANDLER_ARGS
 }
 
 SYSCTL_PROC(_kern, OID_AUTO, wedge_thread, CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, wedge_thread, "I", "wedge this thread so it cannot be cleaned up");
+
+extern unsigned long
+total_corpses_count(void);
+
+static int
+sysctl_total_corpses_count SYSCTL_HANDLER_ARGS;
+
+static int
+sysctl_total_corpses_count SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	int corpse_count = total_corpses_count();
+	return sysctl_io_opaque(req, &corpse_count, sizeof(int), NULL);
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, total_corpses_count, CTLFLAG_RD | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, sysctl_total_corpses_count, "I", "total corpses on the system");
 
 static int
 sysctl_turnstile_test_prim_lock SYSCTL_HANDLER_ARGS;
@@ -4616,10 +4726,10 @@ sysctl_test_mtx_uncontended SYSCTL_HANDLER_ARGS
 
 	printf("%s starting uncontended mutex test with %d iterations\n", __func__, iter);
 
-	offset = snprintf(buffer, buffer_size, "STATS INNER LOOP");
+	offset = scnprintf(buffer, buffer_size, "STATS INNER LOOP");
 	offset += lck_mtx_test_mtx_uncontended(iter, &buffer[offset], buffer_size - offset);
 
-	offset += snprintf(&buffer[offset], buffer_size - offset, "\nSTATS OUTER LOOP");
+	offset += scnprintf(&buffer[offset], buffer_size - offset, "\nSTATS OUTER LOOP");
 	offset += lck_mtx_test_mtx_uncontended_loop_time(iter, &buffer[offset], buffer_size - offset);
 
 	error = SYSCTL_OUT(req, buffer, offset);
@@ -4680,22 +4790,22 @@ sysctl_test_mtx_contended SYSCTL_HANDLER_ARGS
 
 	printf("%s starting contended mutex test with %d iterations FULL_CONTENDED\n", __func__, iter);
 
-	offset = snprintf(buffer, buffer_size, "STATS INNER LOOP");
+	offset = scnprintf(buffer, buffer_size, "STATS INNER LOOP");
 	offset += lck_mtx_test_mtx_contended(iter, &buffer[offset], buffer_size - offset, FULL_CONTENDED);
 
 	printf("%s starting contended mutex loop test with %d iterations FULL_CONTENDED\n", __func__, iter);
 
-	offset += snprintf(&buffer[offset], buffer_size - offset, "\nSTATS OUTER LOOP");
+	offset += scnprintf(&buffer[offset], buffer_size - offset, "\nSTATS OUTER LOOP");
 	offset += lck_mtx_test_mtx_contended_loop_time(iter, &buffer[offset], buffer_size - offset, FULL_CONTENDED);
 
 	printf("%s starting contended mutex test with %d iterations HALF_CONTENDED\n", __func__, iter);
 
-	offset += snprintf(&buffer[offset], buffer_size - offset, "STATS INNER LOOP");
+	offset += scnprintf(&buffer[offset], buffer_size - offset, "STATS INNER LOOP");
 	offset += lck_mtx_test_mtx_contended(iter, &buffer[offset], buffer_size - offset, HALF_CONTENDED);
 
 	printf("%s starting contended mutex loop test with %d iterations HALF_CONTENDED\n", __func__, iter);
 
-	offset += snprintf(&buffer[offset], buffer_size - offset, "\nSTATS OUTER LOOP");
+	offset += scnprintf(&buffer[offset], buffer_size - offset, "\nSTATS OUTER LOOP");
 	offset += lck_mtx_test_mtx_contended_loop_time(iter, &buffer[offset], buffer_size - offset, HALF_CONTENDED);
 
 	error = SYSCTL_OUT(req, buffer, offset);
@@ -4720,8 +4830,42 @@ SYSCTL_PROC(_kern, OID_AUTO, test_mtx_uncontended, CTLTYPE_STRING | CTLFLAG_MASK
 
 extern uint64_t MutexSpin;
 
-SYSCTL_QUAD(_kern, OID_AUTO, mutex_spin_us, CTLFLAG_RW, &MutexSpin,
-    "Spin time for acquiring a kernel mutex");
+SYSCTL_QUAD(_kern, OID_AUTO, mutex_spin_abs, CTLFLAG_RW, &MutexSpin,
+    "Spin time in abs for acquiring a kernel mutex");
+
+extern uint64_t low_MutexSpin;
+extern int64_t high_MutexSpin;
+extern unsigned int real_ncpus;
+
+SYSCTL_QUAD(_kern, OID_AUTO, low_mutex_spin_abs, CTLFLAG_RW, &low_MutexSpin,
+    "Low spin threshold in abs for acquiring a kernel mutex");
+
+static int
+sysctl_high_mutex_spin_ns SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	int error;
+	int64_t val = 0;
+	int64_t res;
+
+	/* Check if the user is writing to high_MutexSpin, or just reading it */
+	if (req->newptr) {
+		error = SYSCTL_IN(req, &val, sizeof(val));
+		if (error || (val < 0 && val != -1)) {
+			return error;
+		}
+		high_MutexSpin = val;
+	}
+
+	if (high_MutexSpin >= 0) {
+		res = high_MutexSpin;
+	} else {
+		res = low_MutexSpin * real_ncpus;
+	}
+	return SYSCTL_OUT(req, &res, sizeof(res));
+}
+SYSCTL_PROC(_kern, OID_AUTO, high_mutex_spin_abs, CTLFLAG_RW | CTLTYPE_QUAD, 0, 0, sysctl_high_mutex_spin_ns, "I",
+    "High spin threshold in abs for acquiring a kernel mutex");
 
 #if defined (__x86_64__)
 
@@ -4816,15 +4960,15 @@ sysctl_get_owned_vmobjects SYSCTL_HANDLER_ARGS
 	int error;
 	mach_port_name_t task_port_name;
 	task_t task;
-	int buffer_size = (req->oldptr != USER_ADDR_NULL) ? req->oldlen : 0;
+	size_t buffer_size = (req->oldptr != USER_ADDR_NULL) ? req->oldlen : 0;
 	vmobject_list_output_t buffer;
 	size_t output_size;
 
 	if (buffer_size) {
-		const int min_size = sizeof(vm_object_query_data_t) + sizeof(int64_t);
+		const size_t min_size = sizeof(vm_object_query_data_t) + sizeof(int64_t);
 
-		if (buffer_size < min_size) {
-			buffer_size = min_size;
+		if (buffer_size < min_size || buffer_size > INT_MAX) {
+			return EINVAL;
 		}
 
 		buffer = kalloc(buffer_size);

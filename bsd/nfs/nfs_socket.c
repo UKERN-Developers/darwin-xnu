@@ -65,6 +65,9 @@
  * FreeBSD-Id: nfs_socket.c,v 1.30 1997/10/28 15:59:07 bde Exp $
  */
 
+#include <nfs/nfs_conf.h>
+#if CONFIG_NFS
+
 /*
  * Socket operations for use by nfs
  */
@@ -116,13 +119,13 @@ boolean_t       current_thread_aborted(void);
 kern_return_t   thread_terminate(thread_t);
 
 
-#if NFSSERVER
+#if CONFIG_NFS_SERVER
 int nfsrv_sock_max_rec_queue_length = 128; /* max # RPC records queued on (UDP) socket */
 
 int nfsrv_getstream(struct nfsrv_sock *, int);
 int nfsrv_getreq(struct nfsrv_descript *);
 extern int nfsv3_procid[NFS_NPROCS];
-#endif /* NFSSERVER */
+#endif /* CONFIG_NFS_SERVER */
 
 /*
  * compare two sockaddr structures
@@ -153,7 +156,7 @@ nfs_sockaddr_cmp(struct sockaddr *sa1, struct sockaddr *sa2)
 	return -1;
 }
 
-#if NFSCLIENT
+#if CONFIG_NFS_CLIENT
 
 int     nfs_connect_search_new_socket(struct nfsmount *, struct nfs_socket_search *, struct timeval *);
 int     nfs_connect_search_socket_connect(struct nfsmount *, struct nfs_socket *, int);
@@ -328,9 +331,9 @@ nfs_location_mntfromname(struct nfs_fs_locations *locs, struct nfs_location_inde
 			if (*fsl->nl_servers[idx.nli_serv]->ns_addresses[idx.nli_addr]) {
 				name = fsl->nl_servers[idx.nli_serv]->ns_addresses[idx.nli_addr];
 			}
-			cnt = snprintf(p, size, "<%s>:", name);
+			cnt = scnprintf(p, size, "<%s>:", name);
 		} else {
-			cnt = snprintf(p, size, "%s:", name);
+			cnt = scnprintf(p, size, "%s:", name);
 		}
 		p += cnt;
 		size -= cnt;
@@ -345,7 +348,7 @@ nfs_location_mntfromname(struct nfs_fs_locations *locs, struct nfs_location_inde
 	}
 	/* append each server path component */
 	for (i = 0; (size > 0) && (i < (int)fsl->nl_path.np_compcount); i++) {
-		cnt = snprintf(p, size, "/%s", fsl->nl_path.np_components[i]);
+		cnt = scnprintf(p, size, "/%s", fsl->nl_path.np_components[i]);
 		p += cnt;
 		size -= cnt;
 	}
@@ -1796,23 +1799,21 @@ keepsearching:
 			if (!NFS_BITMAP_ISSET(nmp->nm_mattrs, NFS_MATTR_SOCKET_TYPE)) {
 				nmp->nm_sotype = 0;
 			}
-			if (!NFS_BITMAP_ISSET(nmp->nm_mattrs, NFS_MATTR_NFS_VERSION)) {
 #if CONFIG_NFS4
-				if (nmp->nm_vers >= NFS_VER4) {
-					if (!NFS_BITMAP_ISSET(nmp->nm_mattrs, NFS_MATTR_NFS_PORT)) {
-						nmp->nm_nfsport = 0;
-					}
-					if (nmp->nm_cbid) {
-						nfs4_mount_callback_shutdown(nmp);
-					}
-					if (IS_VALID_CRED(nmp->nm_mcred)) {
-						kauth_cred_unref(&nmp->nm_mcred);
-					}
-					bzero(&nmp->nm_un, sizeof(nmp->nm_un));
+			if (nmp->nm_vers >= NFS_VER4) {
+				if (!NFS_BITMAP_ISSET(nmp->nm_mattrs, NFS_MATTR_NFS_PORT)) {
+					nmp->nm_nfsport = 0;
 				}
-#endif
-				nmp->nm_vers = 0;
+				if (nmp->nm_cbid) {
+					nfs4_mount_callback_shutdown(nmp);
+				}
+				if (IS_VALID_CRED(nmp->nm_mcred)) {
+					kauth_cred_unref(&nmp->nm_mcred);
+				}
+				bzero(&nmp->nm_un, sizeof(nmp->nm_un));
 			}
+#endif
+			nmp->nm_vers = 0;
 		}
 		lck_mtx_unlock(&nmp->nm_lock);
 		nmp->nm_nso = NULL;
@@ -6324,9 +6325,9 @@ nfs_up(struct nfsmount *nmp, thread_t thd, int flags, const char *msg)
 }
 
 
-#endif /* NFSCLIENT */
+#endif /* CONFIG_NFS_CLIENT */
 
-#if NFSSERVER
+#if CONFIG_NFS_SERVER
 
 /*
  * Generate the rpc reply header
@@ -7046,4 +7047,6 @@ nfsrv_wakenfsd(struct nfsrv_sock *slp)
 	wakeup(nd);
 }
 
-#endif /* NFSSERVER */
+#endif /* CONFIG_NFS_SERVER */
+
+#endif /* CONFIG_NFS */

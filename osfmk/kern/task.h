@@ -271,6 +271,7 @@ struct task {
 #define TF_CA_CLIENT_WI         0x00000800                              /* task has CA_CLIENT work interval */
 #define TF_DARKWAKE_MODE        0x00001000                              /* task is in darkwake mode */
 #define TF_NO_SMT               0x00002000                              /* task threads must not be paired with SMT threads */
+#define TF_PAC_EXC_FATAL        0x00004000                              /* task is marked a corpse if a PAC exception occurs */
 
 /*
  * Task is running within a 64-bit address space.
@@ -427,6 +428,7 @@ struct task {
 #if __arm64__
 	unsigned int    task_legacy_footprint:1;
 	unsigned int    task_extra_footprint_limit:1;
+	unsigned int    task_ios13extended_footprint_limit:1;
 #endif /* __arm64__ */
 	unsigned int    task_region_footprint:1;
 	unsigned int    task_has_crossed_thread_limit:1;
@@ -499,11 +501,17 @@ extern kern_return_t
 
 #define TASK_REFERENCE_LEAK_DEBUG 0
 
+extern zone_t task_zone;
+
 #if TASK_REFERENCE_LEAK_DEBUG
 extern void task_reference_internal(task_t task);
 extern os_ref_count_t task_deallocate_internal(task_t task);
 #else
-#define task_reference_internal(task) os_ref_retain(&(task)->ref_count)
+#define task_reference_internal(task)      \
+MACRO_BEGIN                                \
+	zone_require(task, task_zone);     \
+	os_ref_retain(&(task)->ref_count); \
+MACRO_END
 #define task_deallocate_internal(task) os_ref_release(&(task)->ref_count)
 #endif
 
@@ -695,6 +703,11 @@ extern kern_return_t    task_create_internal(
 	uint32_t        procflags,
 	uint8_t         t_returnwaitflags,
 	task_t          *child_task);                                                   /* OUT */
+
+extern kern_return_t    task_set_special_port_internal(
+	task_t                  task,
+	int                     which,
+	ipc_port_t              port);
 
 extern kern_return_t    task_info(
 	task_t                  task,
@@ -950,6 +963,11 @@ extern void task_copy_fields_for_exec(task_t dst_task, task_t src_task);
 
 extern void task_copy_vmobjects(task_t task, vm_object_query_t query, int len, int64_t* num);
 
+#if __has_feature(ptrauth_calls)
+extern bool task_is_pac_exception_fatal(task_t task);
+extern void task_set_pac_exception_fatal_flag(task_t task);
+#endif /*__has_feature(ptrauth_calls)*/
+
 #endif  /* XNU_KERNEL_PRIVATE */
 
 #ifdef  KERNEL_PRIVATE
@@ -1004,6 +1022,7 @@ extern boolean_t task_get_darkwake_mode(task_t);
 #if __arm64__
 extern void task_set_legacy_footprint(task_t task);
 extern void task_set_extra_footprint_limit(task_t task);
+extern void task_set_ios13extended_footprint_limit(task_t task);
 #endif /* __arm64__ */
 
 #if CONFIG_MACF

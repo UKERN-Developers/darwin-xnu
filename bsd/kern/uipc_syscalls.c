@@ -965,7 +965,6 @@ connectit(struct socket *so, struct sockaddr *sa)
 	}
 	error = soconnectlock(so, sa, 0);
 	if (error != 0) {
-		so->so_state &= ~SS_ISCONNECTING;
 		goto out;
 	}
 	if ((so->so_state & SS_NBIO) && (so->so_state & SS_ISCONNECTING)) {
@@ -1005,7 +1004,6 @@ connectitx(struct socket *so, struct sockaddr *src,
     user_ssize_t *bytes_written)
 {
 	int error;
-#pragma unused (flags)
 
 	VERIFY(dst != NULL);
 
@@ -1028,43 +1026,9 @@ connectitx(struct socket *so, struct sockaddr *src,
 		goto out;
 	}
 
-	if ((so->so_proto->pr_flags & PR_DATA_IDEMPOTENT) &&
-	    (flags & CONNECT_DATA_IDEMPOTENT)) {
-		so->so_flags1 |= SOF1_DATA_IDEMPOTENT;
-
-		if (flags & CONNECT_DATA_AUTHENTICATED) {
-			so->so_flags1 |= SOF1_DATA_AUTHENTICATED;
-		}
-	}
-
-	/*
-	 * Case 1: CONNECT_RESUME_ON_READ_WRITE set, no data.
-	 * Case 2: CONNECT_RESUME_ON_READ_WRITE set, with data (user error)
-	 * Case 3: CONNECT_RESUME_ON_READ_WRITE not set, with data
-	 * Case 3 allows user to combine write with connect even if they have
-	 * no use for TFO (such as regular TCP, and UDP).
-	 * Case 4: CONNECT_RESUME_ON_READ_WRITE not set, no data (regular case)
-	 */
-	if ((so->so_proto->pr_flags & PR_PRECONN_WRITE) &&
-	    ((flags & CONNECT_RESUME_ON_READ_WRITE) || auio)) {
-		so->so_flags1 |= SOF1_PRECONNECT_DATA;
-	}
-
-	/*
-	 * If a user sets data idempotent and does not pass an uio, or
-	 * sets CONNECT_RESUME_ON_READ_WRITE, this is an error, reset
-	 * SOF1_DATA_IDEMPOTENT.
-	 */
-	if (!(so->so_flags1 & SOF1_PRECONNECT_DATA) &&
-	    (so->so_flags1 & SOF1_DATA_IDEMPOTENT)) {
-		/* We should return EINVAL instead perhaps. */
-		so->so_flags1 &= ~SOF1_DATA_IDEMPOTENT;
-	}
-
 	error = soconnectxlocked(so, src, dst, p, ifscope,
-	    aid, pcid, 0, NULL, 0, auio, bytes_written);
+	    aid, pcid, flags, NULL, 0, auio, bytes_written);
 	if (error != 0) {
-		so->so_state &= ~SS_ISCONNECTING;
 		goto out;
 	}
 	/*
@@ -1390,6 +1354,11 @@ sendto_nocancel(struct proc *p,
 	KERNEL_DEBUG(DBG_FNC_SENDTO | DBG_FUNC_START, 0, 0, 0, 0, 0);
 	AUDIT_ARG(fd, uap->s);
 
+	if (uap->flags & MSG_SKIPCFIL) {
+		error = EPERM;
+		goto done;
+	}
+
 	auio = uio_create(1, 0,
 	    (IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32),
 	    UIO_WRITE);
@@ -1459,6 +1428,12 @@ sendmsg_nocancel(struct proc *p, struct sendmsg_nocancel_args *uap,
 
 	KERNEL_DEBUG(DBG_FNC_SENDMSG | DBG_FUNC_START, 0, 0, 0, 0, 0);
 	AUDIT_ARG(fd, uap->s);
+
+	if (uap->flags & MSG_SKIPCFIL) {
+		error = EPERM;
+		goto done;
+	}
+
 	if (IS_64BIT_PROCESS(p)) {
 		msghdrp = (caddr_t)&msg64;
 		size_of_msghdr = sizeof(msg64);
@@ -1571,6 +1546,11 @@ sendmsg_x(struct proc *p, struct sendmsg_x_args *uap, user_ssize_t *retval)
 	int has_addr_or_ctl = 0;
 
 	KERNEL_DEBUG(DBG_FNC_SENDMSG_X | DBG_FUNC_START, 0, 0, 0, 0, 0);
+
+	if (uap->flags & MSG_SKIPCFIL) {
+		error = EPERM;
+		goto out;
+	}
 
 	error = file_socket(uap->s, &so);
 	if (error) {

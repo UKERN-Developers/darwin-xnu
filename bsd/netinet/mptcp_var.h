@@ -62,6 +62,7 @@ struct mptses {
 	struct mptcb    *mpte_mptcb;            /* ptr to MPTCP PCB */
 	TAILQ_HEAD(, mptopt) mpte_sopts;        /* list of socket options */
 	TAILQ_HEAD(, mptsub) mpte_subflows;     /* list of subflows */
+#define MPTCP_MAX_NUM_SUBFLOWS 256
 	uint16_t        mpte_numflows;          /* # of subflows in list */
 	uint16_t        mpte_nummpcapflows;     /* # of MP_CAP subflows */
 	sae_associd_t   mpte_associd;           /* MPTCP association ID */
@@ -554,6 +555,8 @@ extern uint32_t mptcp_dbg_area; /* Multipath TCP debugging area */
 extern int mptcp_developer_mode;        /* Allow aggregation mode */
 extern uint32_t mptcp_cellicon_refcount;
 
+#define MPTCP_CELLICON_TOGGLE_RATE      (5 * TCP_RETRANSHZ) /* Only toggle every 5 seconds */
+
 extern int tcp_jack_rxmt;       /* Join ACK retransmission value in msecs */
 
 __BEGIN_DECLS
@@ -642,6 +645,7 @@ extern struct sockaddr *mptcp_get_session_dst(struct mptses *mpte,
     boolean_t has_v6, boolean_t has_v4);
 extern void mptcp_set_restrictions(struct socket *mp_so);
 extern void mptcp_clear_cellicon(void);
+extern void mptcp_unset_cellicon(struct mptses *mpte, struct mptsub *mpts, uint32_t val);
 extern void mptcp_reset_rexmit_state(struct tcpcb *tp);
 extern void mptcp_reset_keepalive(struct tcpcb *tp);
 extern int mptcp_validate_csum(struct tcpcb *tp, struct mbuf *m, uint64_t dsn,

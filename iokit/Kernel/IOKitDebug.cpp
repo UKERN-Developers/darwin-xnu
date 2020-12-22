@@ -493,7 +493,7 @@ IOTrackingAddUser(IOTrackingQueue * queue, IOTrackingUser * mem, vm_size_t size)
 	if ((kernel_task != current_task()) && (self = proc_self())) {
 		bool user_64 = false;
 		mem->btPID  = proc_pid(self);
-		(void)backtrace_user(&mem->btUser[0], kIOTrackingCallSiteBTs - 1, &num,
+		num = backtrace_user(&mem->btUser[0], kIOTrackingCallSiteBTs - 1, NULL,
 		    &user_64, NULL);
 		mem->user32 = !user_64;
 		proc_rele(self);
@@ -874,6 +874,10 @@ IOTrackingLeakScan(void * refcon)
 
 		for (ptrIdx = 0; ptrIdx < (page_size / sizeof(uintptr_t)); ptrIdx++) {
 			ptr = ((uintptr_t *)vphysaddr)[ptrIdx];
+#if defined(HAS_APPLE_PAC)
+			// strip possible ptrauth signature from candidate data pointer
+			ptr = (uintptr_t)ptrauth_strip((void*)ptr, ptrauth_key_process_independent_data);
+#endif /* defined(HAS_APPLE_PAC) */
 
 			for (lim = count, baseIdx = 0; lim; lim >>= 1) {
 				inst = instances[baseIdx + (lim >> 1)];

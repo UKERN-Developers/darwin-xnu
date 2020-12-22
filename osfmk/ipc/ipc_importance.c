@@ -2578,7 +2578,7 @@ ipc_importance_send(
 		ipc_voucher_t voucher;
 
 		assert(ip_kotype(kmsg->ikm_voucher) == IKOT_VOUCHER);
-		voucher = (ipc_voucher_t)kmsg->ikm_voucher->ip_kobject;
+		voucher = (ipc_voucher_t)ip_get_kobject(kmsg->ikm_voucher);
 
 		/* check to see if the voucher has an importance attribute */
 		val_count = MACH_VOUCHER_ATTR_VALUE_MAX_NESTED;
@@ -2659,7 +2659,7 @@ portupdate:
 #if IMPORTANCE_TRACE
 	if (kdebug_enable) {
 		mach_msg_max_trailer_t *dbgtrailer = (mach_msg_max_trailer_t *)
-		    ((vm_offset_t)kmsg->ikm_header + round_msg(kmsg->ikm_header->msgh_size));
+		    ((vm_offset_t)kmsg->ikm_header + mach_round_msg(kmsg->ikm_header->msgh_size));
 		unsigned int sender_pid = dbgtrailer->msgh_audit.val[5];
 		mach_msg_id_t imp_msgh_id = kmsg->ikm_header->msgh_id;
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, (IMPORTANCE_CODE(IMP_MSG, IMP_MSG_SEND)) | DBG_FUNC_START,
@@ -3174,7 +3174,7 @@ ipc_importance_receive(
 	task_t task_self = current_task();
 	unsigned int sender_pid = ((mach_msg_max_trailer_t *)
 	    ((vm_offset_t)kmsg->ikm_header +
-	    round_msg(kmsg->ikm_header->msgh_size)))->msgh_audit.val[5];
+	    mach_round_msg(kmsg->ikm_header->msgh_size)))->msgh_audit.val[5];
 #endif
 
 	/* convert to a voucher with an inherit importance attribute? */
@@ -3190,7 +3190,7 @@ ipc_importance_receive(
 
 		/* set up recipe to copy the old voucher */
 		if (IP_VALID(kmsg->ikm_voucher)) {
-			ipc_voucher_t sent_voucher = (ipc_voucher_t)kmsg->ikm_voucher->ip_kobject;
+			ipc_voucher_t sent_voucher = (ipc_voucher_t)ip_get_kobject(kmsg->ikm_voucher);
 
 			recipe->key = MACH_VOUCHER_ATTR_KEY_ALL;
 			recipe->command = MACH_VOUCHER_ATTR_COPY;

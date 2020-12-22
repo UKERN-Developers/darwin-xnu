@@ -101,7 +101,16 @@ int             debug_task;
 boolean_t up_style_idle_exit = 0;
 
 
+#if HAS_NEX_PG
+uint32_t nex_pg = 1;
+extern void set_nex_pg(void);
+#endif
 
+#if HAS_BP_RET
+/* Enable both branch target retention (0x2) and branch direction retention (0x1) across sleep */
+uint32_t bp_ret = 3;
+extern void set_bp_ret(void);
+#endif
 
 #if INTERRUPT_MASKED_DEBUG
 boolean_t interrupt_masked_debug = 1;
@@ -366,8 +375,10 @@ arm_init(
 	    + ((uintptr_t)&BootCpuData
 	    - (uintptr_t)(args->virtBase)));
 
-	thread_bootstrap();
-	thread = current_thread();
+	thread = thread_bootstrap();
+	thread->machine.CpuDatap = &BootCpuData;
+	machine_set_current_thread(thread);
+
 	/*
 	 * Preemption is enabled for this thread so that it can lock mutexes without
 	 * tripping the preemption check. In reality scheduling is not enabled until
@@ -375,7 +386,6 @@ arm_init(
 	 * preemption level is not really meaningful for the bootstrap thread.
 	 */
 	thread->machine.preemption_count = 0;
-	thread->machine.CpuDatap = &BootCpuData;
 #if     __arm__ && __ARM_USER_PROTECT__
 	{
 		unsigned int ttbr0_val, ttbr1_val, ttbcr_val;
@@ -433,7 +443,15 @@ arm_init(
 	PE_parse_boot_argn("interrupt_masked_debug_timeout", &interrupt_masked_timeout, sizeof(interrupt_masked_timeout));
 #endif
 
+#if HAS_NEX_PG
+	PE_parse_boot_argn("nexpg", &nex_pg, sizeof(nex_pg));
+	set_nex_pg(); // Apply NEX powergating settings to boot CPU
+#endif
 
+#if HAS_BP_RET
+	PE_parse_boot_argn("bpret", &bp_ret, sizeof(bp_ret));
+	set_bp_ret(); // Apply branch predictor retention settings to boot CPU
+#endif
 
 	PE_parse_boot_argn("immediate_NMI", &force_immediate_debug_halt, sizeof(force_immediate_debug_halt));
 
@@ -629,6 +647,14 @@ arm_init_cpu(
 	mt_wake_per_core();
 #endif /* MONOTONIC && defined(__arm64__) */
 
+#if defined(KERNEL_INTEGRITY_CTRR)
+	if (cpu_data_ptr->cluster_master) {
+		lck_spin_lock(&ctrr_cpu_start_lck);
+		ctrr_cluster_locked[cpu_data_ptr->cpu_cluster_id] = 1;
+		thread_wakeup(&ctrr_cluster_locked[cpu_data_ptr->cpu_cluster_id]);
+		lck_spin_unlock(&ctrr_cpu_start_lck);
+	}
+#endif
 
 	slave_main(NULL);
 }

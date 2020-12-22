@@ -168,6 +168,7 @@
 #include <net/restricted_in_port.h> /* for restricted_in_port_init() */
 #include <kern/assert.h>                /* for assert() */
 #include <sys/kern_overrides.h>         /* for init_system_override() */
+#include <sys/lockf.h>                  /* for lf_init() */
 
 #include <net/init.h>
 
@@ -315,6 +316,8 @@ __private_extern__ int bootarg_vnode_cache_defeat = 0;
 __private_extern__ int bootarg_no_vnode_jetsam = 0;
 #endif /* CONFIG_JETSAM && (DEVELOPMENT || DEBUG) */
 
+__private_extern__ int bootarg_no_vnode_drain = 0;
+
 /*
  * Prevent kernel-based ASLR from being used, for testing.
  */
@@ -412,6 +415,7 @@ lck_grp_t * proc_kqhashlock_grp;
 lck_grp_t * proc_knhashlock_grp;
 lck_grp_t * proc_ucred_mlock_grp;
 lck_grp_t * proc_mlock_grp;
+lck_grp_t * proc_dirslock_grp;
 lck_grp_attr_t * proc_lck_grp_attr;
 lck_attr_t * proc_lck_attr;
 lck_mtx_t * proc_list_mlock;
@@ -530,6 +534,7 @@ bsd_init(void)
 	proc_fdmlock_grp = lck_grp_alloc_init("proc-fdmlock", proc_lck_grp_attr);
 	proc_kqhashlock_grp = lck_grp_alloc_init("proc-kqhashlock", proc_lck_grp_attr);
 	proc_knhashlock_grp = lck_grp_alloc_init("proc-knhashlock", proc_lck_grp_attr);
+	proc_dirslock_grp = lck_grp_alloc_init("proc-dirslock", proc_lck_grp_attr);
 #if CONFIG_XNUPOST
 	sysctl_debug_test_stackshot_owner_grp = lck_grp_alloc_init("test-stackshot-owner-grp", LCK_GRP_ATTR_NULL);
 	sysctl_debug_test_stackshot_owner_init_mtx = lck_mtx_alloc_init(
@@ -545,6 +550,7 @@ bsd_init(void)
 	lck_mtx_init(&kernproc->p_fdmlock, proc_fdmlock_grp, proc_lck_attr);
 	lck_mtx_init(&kernproc->p_ucred_mlock, proc_ucred_mlock_grp, proc_lck_attr);
 	lck_spin_init(&kernproc->p_slock, proc_slock_grp, proc_lck_attr);
+	lck_rw_init(&kernproc->p_dirs_lock, proc_dirslock_grp, proc_lck_attr);
 
 	assert(bsd_simul_execs != 0);
 	execargs_cache_lock = lck_mtx_alloc_init(proc_lck_grp, proc_lck_attr);
@@ -759,6 +765,10 @@ bsd_init(void)
 	/* Initialize the file systems. */
 	bsd_init_kprintf("calling vfsinit\n");
 	vfsinit();
+
+	/* Initialize file locks. */
+	bsd_init_kprintf("calling lf_init\n");
+	lf_init();
 
 #if CONFIG_PROC_UUID_POLICY
 	/* Initial proc_uuid_policy subsystem */
@@ -1331,6 +1341,9 @@ parse_bsd_args(void)
 	}
 #endif /* CONFIG_JETSAM && (DEVELOPMENT || DEBUG) */
 
+	if (PE_parse_boot_argn("-no_vnode_drain", namep, sizeof(namep))) {
+		bootarg_no_vnode_drain = 1;
+	}
 
 #if CONFIG_EMBEDDED
 	/*

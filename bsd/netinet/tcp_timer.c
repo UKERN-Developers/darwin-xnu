@@ -128,25 +128,27 @@ static int
 sysctl_msec_to_ticks SYSCTL_HANDLER_ARGS
 {
 #pragma unused(arg2)
-	int error, s, tt;
+	int error, temp;
+	long s, tt;
 
 	tt = *(int *)arg1;
-	if (tt < 0 || tt >= INT_MAX / 1000) {
+	s = tt * 1000 / TCP_RETRANSHZ;
+	if (tt < 0 || s > INT_MAX) {
 		return EINVAL;
 	}
-	s = tt * 1000 / TCP_RETRANSHZ;
+	temp = (int)s;
 
-	error = sysctl_handle_int(oidp, &s, 0, req);
+	error = sysctl_handle_int(oidp, &temp, 0, req);
 	if (error || !req->newptr) {
 		return error;
 	}
 
-	tt = s * TCP_RETRANSHZ / 1000;
-	if (tt < 1) {
+	tt = temp * TCP_RETRANSHZ / 1000;
+	if (tt < 1 || tt > INT_MAX) {
 		return EINVAL;
 	}
 
-	*(int *)arg1 = tt;
+	*(int *)arg1 = (int)tt;
 	SYSCTL_SKMEM_UPDATE_AT_OFFSET(arg2, *(int*)arg1);
 	return 0;
 }
@@ -311,7 +313,6 @@ static void tcp_remove_timer(struct tcpcb *tp);
 static void tcp_sched_timerlist(uint32_t offset);
 static u_int32_t tcp_run_conn_timer(struct tcpcb *tp, u_int16_t *mode,
     u_int16_t probe_if_index);
-static void tcp_sched_timers(struct tcpcb *tp);
 static inline void tcp_set_lotimer_index(struct tcpcb *);
 __private_extern__ void tcp_remove_from_time_wait(struct inpcb *inp);
 static inline void tcp_update_mss_core(struct tcpcb *tp, struct ifnet *ifp);
@@ -1550,6 +1551,27 @@ fc_output:
 			(void) tcp_output(tp);
 		}
 		break;
+	case TCPT_CELLICON:
+	{
+		struct mptses *mpte = tptomptp(tp)->mpt_mpte;
+
+		tp->t_timer[TCPT_CELLICON] = 0;
+
+		if (mpte->mpte_cellicon_increments == 0) {
+			/* Cell-icon not set by this connection */
+			break;
+		}
+
+		if (TSTMP_LT(mpte->mpte_last_cellicon_set + MPTCP_CELLICON_TOGGLE_RATE, tcp_now)) {
+			mptcp_unset_cellicon(mpte, NULL, 1);
+		}
+
+		if (mpte->mpte_cellicon_increments) {
+			tp->t_timer[TCPT_CELLICON] = OFFSET_FROM_START(tp, MPTCP_CELLICON_TOGGLE_RATE);
+		}
+
+		break;
+	}
 #endif /* MPTCP */
 
 	case TCPT_PTO:

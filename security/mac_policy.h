@@ -1856,6 +1856,32 @@ typedef int mpo_mount_check_snapshot_delete_t(
 	const char *name
 	);
 /**
+ *  @brief Access control check for fs_snapshot_mount
+ *  @param cred Subject credential
+ *  @param rvp Vnode of either the root directory of the
+ *  filesystem to mount snapshot of, or the device from
+ *  which to mount the snapshot.
+ *  @param vp Vnode that is to be the mount point
+ *  @param cnp Component name for vp
+ *  @param name Name of snapshot to mount
+ *  @param vfc_name Filesystem type name
+ *
+ *  Determine whether the subject identified by the credential can
+ *  mount the named snapshot from the filesystem at the given
+ *  directory.
+ *
+ *  @return Return 0 if access is granted, otherwise an appropriate value
+ *  for errno should be returned.
+ */
+typedef int mpo_mount_check_snapshot_mount_t(
+	kauth_cred_t cred,
+	struct vnode *rvp,
+	struct vnode *vp,
+	struct componentname *cnp,
+	const char *name,
+	const char *vfc_name
+	);
+/**
  *  @brief Access control check for fs_snapshot_revert
  *  @param cred Subject credential
  *  @mp Filesystem mount point to revert to snapshot
@@ -2750,6 +2776,19 @@ typedef int mpo_priv_check_t(
 typedef int mpo_priv_grant_t(
 	kauth_cred_t cred,
 	int priv
+	);
+/**
+ *  @brief Access control over process core dumps
+ *  @param proc Subject process
+ *
+ *  Determine whether a core dump may be written to disk for the subject
+ *  identified.
+ *
+ *  @return Return 0 if access is granted, otherwise an appropriate value for
+ *  errno should be returned.
+ */
+typedef int mpo_proc_check_dump_core_t(
+	struct proc *proc
 	);
 /**
  *  @brief Access control check for debugging process
@@ -6283,7 +6322,7 @@ typedef void mpo_reserved_hook_t(void);
  * Please note that this should be kept in sync with the check assumptions
  * policy in bsd/kern/policy_check.c (policy_ops struct).
  */
-#define MAC_POLICY_OPS_VERSION 58 /* inc when new reserved slots are taken */
+#define MAC_POLICY_OPS_VERSION 62 /* inc when new reserved slots are taken */
 struct mac_policy_ops {
 	mpo_audit_check_postselect_t            *mpo_audit_check_postselect;
 	mpo_audit_check_preselect_t             *mpo_audit_check_preselect;
@@ -6437,7 +6476,7 @@ struct mac_policy_ops {
 
 	mpo_vnode_check_trigger_resolve_t       *mpo_vnode_check_trigger_resolve;
 	mpo_mount_check_mount_late_t            *mpo_mount_check_mount_late;
-	mpo_reserved_hook_t                     *mpo_reserved1;
+	mpo_mount_check_snapshot_mount_t        *mpo_mount_check_snapshot_mount;
 	mpo_reserved_hook_t                     *mpo_reserved2;
 	mpo_skywalk_flow_check_connect_t        *mpo_skywalk_flow_check_connect;
 	mpo_skywalk_flow_check_listen_t         *mpo_skywalk_flow_check_listen;
@@ -6474,8 +6513,8 @@ struct mac_policy_ops {
 	mpo_proc_check_setlcid_t                *mpo_proc_check_setlcid;
 	mpo_proc_check_signal_t                 *mpo_proc_check_signal;
 	mpo_proc_check_wait_t                   *mpo_proc_check_wait;
+	mpo_proc_check_dump_core_t              *mpo_proc_check_dump_core;
 	mpo_reserved_hook_t                     *mpo_reserved5;
-	mpo_reserved_hook_t                     *mpo_reserved6;
 
 	mpo_socket_check_accept_t               *mpo_socket_check_accept;
 	mpo_socket_check_accepted_t             *mpo_socket_check_accepted;

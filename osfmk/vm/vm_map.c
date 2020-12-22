@@ -552,11 +552,11 @@ override_nx(vm_map_t map, uint32_t user_tag) /* map unused on arm */
  *	vm_object_copy_strategically() in vm_object.c.
  */
 
-static zone_t   vm_map_zone;                            /* zone for vm_map structures */
-zone_t                  vm_map_entry_zone;                      /* zone for vm_map_entry structures */
-static zone_t   vm_map_entry_reserved_zone;     /* zone with reserve for non-blocking allocations */
-static zone_t   vm_map_copy_zone;                       /* zone for vm_map_copy structures */
-zone_t                  vm_map_holes_zone;                      /* zone for vm map holes (vm_map_links) structures */
+static zone_t vm_map_zone;                                  /* zone for vm_map structures */
+zone_t vm_map_entry_zone;                                   /* zone for vm_map_entry structures */
+static zone_t vm_map_entry_reserved_zone;                   /* zone with reserve for non-blocking allocations */
+static SECURITY_READ_ONLY_LATE(zone_t) vm_map_copy_zone;    /* zone for vm_map_copy structures */
+zone_t vm_map_holes_zone;                                   /* zone for vm map holes (vm_map_links) structures */
 
 
 /*
@@ -867,6 +867,9 @@ int malloc_no_cow = 0;
 #define VM_PROTECT_WX_FAIL 1
 #endif /* CONFIG_EMBEDDED */
 uint64_t vm_memory_malloc_no_cow_mask = 0ULL;
+#if DEBUG
+int vm_check_map_sanity = 0;
+#endif
 
 /*
  *	vm_map_init:
@@ -1016,6 +1019,15 @@ vm_map_init(
 		    &vm_memory_malloc_no_cow_mask,
 		    sizeof(vm_memory_malloc_no_cow_mask));
 	}
+
+#if DEBUG
+	PE_parse_boot_argn("vm_check_map_sanity", &vm_check_map_sanity, sizeof(vm_check_map_sanity));
+	if (vm_check_map_sanity) {
+		kprintf("VM sanity checking enabled\n");
+	} else {
+		kprintf("VM sanity checking disabled. Set bootarg vm_check_map_sanity=1 to enable\n");
+	}
+#endif /* DEBUG */
 }
 
 void
@@ -1060,12 +1072,12 @@ boolean_t vm_map_supports_hole_optimization = FALSE;
 void
 vm_kernel_reserved_entry_init(void)
 {
-	zone_prio_refill_configure(vm_map_entry_reserved_zone, (6 * PAGE_SIZE) / sizeof(struct vm_map_entry));
+	zone_prio_refill_configure(vm_map_entry_reserved_zone);
 
 	/*
 	 * Once we have our replenish thread set up, we can start using the vm_map_holes zone.
 	 */
-	zone_prio_refill_configure(vm_map_holes_zone, (6 * PAGE_SIZE) / sizeof(struct vm_map_links));
+	zone_prio_refill_configure(vm_map_holes_zone);
 	vm_map_supports_hole_optimization = TRUE;
 }
 
@@ -1185,6 +1197,7 @@ vm_map_create_options(
 	result->map_disallow_data_exec = FALSE;
 	result->is_nested_map = FALSE;
 	result->map_disallow_new_exec = FALSE;
+	result->terminated = FALSE;
 	result->highest_entry_end = 0;
 	result->first_free = vm_map_to_entry(result);
 	result->hint = vm_map_to_entry(result);
@@ -4011,7 +4024,7 @@ vm_map_enter_mem_object_helper(
 	} else if (ip_kotype(port) == IKOT_NAMED_ENTRY) {
 		vm_named_entry_t        named_entry;
 
-		named_entry = (vm_named_entry_t) port->ip_kobject;
+		named_entry = (vm_named_entry_t) ip_get_kobject(port);
 
 		if (flags & (VM_FLAGS_RETURN_DATA_ADDR |
 		    VM_FLAGS_RETURN_4K_DATA_ADDR)) {
@@ -4172,6 +4185,7 @@ vm_map_enter_mem_object_helper(
 
 			copy_map = named_entry->backing.copy;
 			assert(copy_map->type == VM_MAP_COPY_ENTRY_LIST);
+			zone_require(copy_map, vm_map_copy_zone);
 			if (copy_map->type != VM_MAP_COPY_ENTRY_LIST) {
 				/* unsupported type; should not happen */
 				printf("vm_map_enter_mem_object: "
@@ -6135,14 +6149,13 @@ add_wire_counts(
 			/*
 			 * Since this is the first time the user is wiring this map entry, check to see if we're
 			 * exceeding the user wire limits.  There is a per map limit which is the smaller of either
-			 * the process's rlimit or the global vm_user_wire_limit which caps this value.  There is also
+			 * the process's rlimit or the global vm_per_task_user_wire_limit which caps this value.  There is also
 			 * a system-wide limit on the amount of memory all users can wire.  If the user is over either
 			 * limit, then we fail.
 			 */
 
-			if (size + map->user_wire_size > MIN(map->user_wire_limit, vm_user_wire_limit) ||
-			    size + ptoa_64(total_wire_count) > vm_global_user_wire_limit ||
-			    size + ptoa_64(total_wire_count) > max_mem - vm_global_no_user_wire_amount) {
+			if (size + map->user_wire_size > MIN(map->user_wire_limit, vm_per_task_user_wire_limit) ||
+			    size + ptoa_64(total_wire_count) > vm_global_user_wire_limit) {
 				return KERN_RESOURCE_SHORTAGE;
 			}
 
@@ -6669,7 +6682,7 @@ vm_map_wire_nested(
 		if ((entry->protection & VM_PROT_EXECUTE)
 #if !CONFIG_EMBEDDED
 		    &&
-		    map != kernel_map &&
+		    map->pmap != kernel_pmap &&
 		    cs_process_enforcement(NULL)
 #endif /* !CONFIG_EMBEDDED */
 		    ) {
@@ -7601,7 +7614,7 @@ vm_map_delete(
 	const vm_map_offset_t   FIND_GAP = 1;   /* a not page aligned value */
 	const vm_map_offset_t   GAPS_OK = 2;    /* a different not page aligned value */
 
-	if (map != kernel_map && !(flags & VM_MAP_REMOVE_GAPS_OK)) {
+	if (map != kernel_map && !(flags & VM_MAP_REMOVE_GAPS_OK) && !map->terminated) {
 		gap_start = FIND_GAP;
 	} else {
 		gap_start = GAPS_OK;
@@ -8316,6 +8329,34 @@ vm_map_delete(
 	return KERN_SUCCESS;
 }
 
+
+/*
+ *	vm_map_terminate:
+ *
+ *	Clean out a task's map.
+ */
+kern_return_t
+vm_map_terminate(
+	vm_map_t        map)
+{
+	vm_map_lock(map);
+	map->terminated = TRUE;
+	vm_map_unlock(map);
+
+	return vm_map_remove(map,
+	           map->min_offset,
+	           map->max_offset,
+	           /*
+	            * Final cleanup:
+	            * + no unnesting
+	            * + remove immutable mappings
+	            * + allow gaps in range
+	            */
+	           (VM_MAP_REMOVE_NO_UNNESTING |
+	           VM_MAP_REMOVE_IMMUTABLE |
+	           VM_MAP_REMOVE_GAPS_OK));
+}
+
 /*
  *	vm_map_remove:
  *
@@ -8406,6 +8447,7 @@ vm_map_copy_discard(
 
 	switch (copy->type) {
 	case VM_MAP_COPY_ENTRY_LIST:
+		zone_require(copy, vm_map_copy_zone);
 		while (vm_map_copy_first_entry(copy) !=
 		    vm_map_copy_to_entry(copy)) {
 			vm_map_entry_t  entry = vm_map_copy_first_entry(copy);
@@ -8420,6 +8462,7 @@ vm_map_copy_discard(
 		}
 		break;
 	case VM_MAP_COPY_OBJECT:
+		zone_require(copy, vm_map_copy_zone);
 		vm_object_deallocate(copy->cpy_object);
 		break;
 	case VM_MAP_COPY_KERNEL_BUFFER:
@@ -8475,6 +8518,7 @@ vm_map_copy_copy(
 	*new_copy = *copy;
 
 	if (copy->type == VM_MAP_COPY_ENTRY_LIST) {
+		zone_require(copy, vm_map_copy_zone);
 		/*
 		 * The links in the entry chain must be
 		 * changed to point to the new copy object.
@@ -8743,6 +8787,7 @@ vm_map_copy_overwrite_nested(
 	 */
 
 	assert(copy->type == VM_MAP_COPY_ENTRY_LIST);
+	zone_require(copy, vm_map_copy_zone);
 
 	if (copy->size == 0) {
 		if (discard_on_success) {
@@ -9319,6 +9364,7 @@ vm_map_copy_overwrite(
 	vm_map_t        dst_map,
 	vm_map_offset_t dst_addr,
 	vm_map_copy_t   copy,
+	vm_map_size_t   copy_size,
 	boolean_t       interruptible)
 {
 	vm_map_size_t   head_size, tail_size;
@@ -9356,7 +9402,7 @@ blunt_copy:
 	    effective_page_mask);
 	effective_page_size = effective_page_mask + 1;
 
-	if (copy->size < 3 * effective_page_size) {
+	if (copy_size < VM_MAP_COPY_OVERWRITE_OPTIMIZATION_THRESHOLD_PAGES * effective_page_size) {
 		/*
 		 * Too small to bother with optimizing...
 		 */
@@ -9380,24 +9426,24 @@ blunt_copy:
 		head_addr = dst_addr;
 		head_size = (effective_page_size -
 		    (copy->offset & effective_page_mask));
-		head_size = MIN(head_size, copy->size);
+		head_size = MIN(head_size, copy_size);
 	}
-	if (!vm_map_page_aligned(copy->offset + copy->size,
+	if (!vm_map_page_aligned(copy->offset + copy_size,
 	    effective_page_mask)) {
 		/*
 		 * Mis-alignment at the end.
 		 * Do an aligned copy up to the last page and
 		 * then an unaligned copy for the remaining bytes.
 		 */
-		tail_size = ((copy->offset + copy->size) &
+		tail_size = ((copy->offset + copy_size) &
 		    effective_page_mask);
-		tail_size = MIN(tail_size, copy->size);
-		tail_addr = dst_addr + copy->size - tail_size;
+		tail_size = MIN(tail_size, copy_size);
+		tail_addr = dst_addr + copy_size - tail_size;
 		assert(tail_addr >= head_addr + head_size);
 	}
-	assert(head_size + tail_size <= copy->size);
+	assert(head_size + tail_size <= copy_size);
 
-	if (head_size + tail_size == copy->size) {
+	if (head_size + tail_size == copy_size) {
 		/*
 		 * It's all unaligned, no optimization possible...
 		 */
@@ -9417,7 +9463,7 @@ blunt_copy:
 	}
 	for (;
 	    (entry != vm_map_copy_to_entry(copy) &&
-	    entry->vme_start < dst_addr + copy->size);
+	    entry->vme_start < dst_addr + copy_size);
 	    entry = entry->vme_next) {
 		if (entry->is_sub_map) {
 			vm_map_unlock_read(dst_map);
@@ -9450,6 +9496,8 @@ blunt_copy:
 		head_copy->size = head_size;
 		copy->offset += head_size;
 		copy->size -= head_size;
+		copy_size -= head_size;
+		assert(copy_size > 0);
 
 		vm_map_copy_clip_end(copy, entry, copy->offset);
 		vm_map_copy_entry_unlink(copy, entry);
@@ -9481,10 +9529,12 @@ blunt_copy:
 		    copy->cpy_hdr.entries_pageable;
 		vm_map_store_init(&tail_copy->cpy_hdr);
 
-		tail_copy->offset = copy->offset + copy->size - tail_size;
+		tail_copy->offset = copy->offset + copy_size - tail_size;
 		tail_copy->size = tail_size;
 
 		copy->size -= tail_size;
+		copy_size -= tail_size;
+		assert(copy_size > 0);
 
 		entry = vm_map_copy_last_entry(copy);
 		vm_map_copy_clip_start(copy, entry, tail_copy->offset);
@@ -9494,6 +9544,24 @@ blunt_copy:
 		    vm_map_copy_last_entry(tail_copy),
 		    entry);
 	}
+
+	/*
+	 * If we are here from ipc_kmsg_copyout_ool_descriptor(),
+	 * we want to avoid TOCTOU issues w.r.t copy->size but
+	 * we don't need to change vm_map_copy_overwrite_nested()
+	 * and all other vm_map_copy_overwrite variants.
+	 *
+	 * So we assign the original copy_size that was passed into
+	 * this routine back to copy.
+	 *
+	 * This use of local 'copy_size' passed into this routine is
+	 * to try and protect against TOCTOU attacks where the kernel
+	 * has been exploited. We don't expect this to be an issue
+	 * during normal system operation.
+	 */
+	assertf(copy->size == copy_size,
+	    "Mismatch of copy sizes. Expected 0x%llx, Got 0x%llx\n", (uint64_t) copy_size, (uint64_t) copy->size);
+	copy->size = copy_size;
 
 	/*
 	 * Copy most (or possibly all) of the data.
@@ -9519,6 +9587,7 @@ blunt_copy:
 
 done:
 	assert(copy->type == VM_MAP_COPY_ENTRY_LIST);
+	zone_require(copy, vm_map_copy_zone);
 	if (kr == KERN_SUCCESS) {
 		/*
 		 * Discard all the copy maps.
@@ -10499,6 +10568,7 @@ vm_map_copy_validate_size(
 	vm_map_size_t sz = *size;
 	switch (copy->type) {
 	case VM_MAP_COPY_OBJECT:
+		zone_require(copy, vm_map_copy_zone);
 	case VM_MAP_COPY_KERNEL_BUFFER:
 		if (sz == copy_sz) {
 			return TRUE;
@@ -10510,6 +10580,7 @@ vm_map_copy_validate_size(
 		 * validating this flavor of vm_map_copy, but we can at least
 		 * assert that it's within a range.
 		 */
+		zone_require(copy, vm_map_copy_zone);
 		if (copy_sz >= sz &&
 		    copy_sz <= vm_map_round_page(sz, VM_MAP_PAGE_MASK(dst_map))) {
 			*size = copy_sz;
@@ -10609,6 +10680,7 @@ vm_map_copyout_internal(
 	 */
 
 	if (copy->type == VM_MAP_COPY_OBJECT) {
+		zone_require(copy, vm_map_copy_zone);
 		vm_object_t             object = copy->cpy_object;
 		kern_return_t           kr;
 		vm_object_offset_t      offset;
@@ -10648,7 +10720,7 @@ vm_map_copyout_internal(
 		           consume_on_success);
 	}
 
-
+	zone_require(copy, vm_map_copy_zone);
 	/*
 	 *	Find space for the data
 	 */
@@ -11376,37 +11448,20 @@ vm_map_copyin_internal(
 		 *	Attempt non-blocking copy-on-write optimizations.
 		 */
 
-		if (src_destroy &&
-		    (src_object == VM_OBJECT_NULL ||
-		    (src_object->internal &&
-		    src_object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC &&
-		    src_entry->vme_start <= src_addr &&
-		    src_entry->vme_end >= src_end &&
-		    !map_share))) {
-			/*
-			 * If we are destroying the source, and the object
-			 * is internal, we can move the object reference
-			 * from the source to the copy.  The copy is
-			 * copy-on-write only if the source is.
-			 * We make another reference to the object, because
-			 * destroying the source entry will deallocate it.
-			 *
-			 * This memory transfer has to be atomic (to prevent
-			 * the VM object from being shared or copied while
-			 * it's being moved here), so we can only do this
-			 * if we won't have to unlock the VM map, i.e. the
-			 * entire range must be covered by this map entry.
-			 */
-			vm_object_reference(src_object);
-
-			/*
-			 * Copy is always unwired.  vm_map_copy_entry
-			 * set its wired count to zero.
-			 */
-
-			goto CopySuccessful;
-		}
-
+		/*
+		 * If we are destroying the source, and the object
+		 * is internal, we could move the object reference
+		 * from the source to the copy.  The copy is
+		 * copy-on-write only if the source is.
+		 * We make another reference to the object, because
+		 * destroying the source entry will deallocate it.
+		 *
+		 * This memory transfer has to be atomic, (to prevent
+		 * the VM object from being shared or copied while
+		 * it's being moved here), so we could only do this
+		 * if we won't have to unlock the VM map until the
+		 * original mapping has been fully removed.
+		 */
 
 RestartCopy:
 		if ((src_object == VM_OBJECT_NULL ||
@@ -13246,6 +13301,7 @@ protection_failure:
 	*offset = (vaddr - entry->vme_start) + VME_OFFSET(entry);
 	*object = VME_OBJECT(entry);
 	*out_prot = prot;
+	KDBG_FILTERED(MACHDBG_CODE(DBG_MACH_WORKINGSET, VM_MAP_LOOKUP_OBJECT), VM_KERNEL_UNSLIDE_OR_PERM(*object), 0, 0, 0, 0);
 
 	if (fault_info) {
 		fault_info->interruptible = THREAD_UNINT; /* for now... */
@@ -15956,6 +16012,13 @@ RestartCopy:
 		if (!copy) {
 			if (src_entry->used_for_jit == TRUE) {
 				if (same_map) {
+#if __APRR_SUPPORTED__
+					/*
+					 * Disallow re-mapping of any JIT regions on APRR devices.
+					 */
+					result = KERN_PROTECTION_FAILURE;
+					break;
+#endif /* __APRR_SUPPORTED__*/
 				} else {
 #if CONFIG_EMBEDDED
 					/*
@@ -17672,6 +17735,7 @@ vm_map_msync(
 
 			local_map = VME_SUBMAP(entry);
 			local_offset = VME_OFFSET(entry);
+			vm_map_reference(local_map);
 			vm_map_unlock(map);
 			if (vm_map_msync(
 				    local_map,
@@ -17680,6 +17744,7 @@ vm_map_msync(
 				    sync_flags) == KERN_INVALID_ADDRESS) {
 				had_hole = TRUE;
 			}
+			vm_map_deallocate(local_map);
 			continue;
 		}
 		object = VME_OBJECT(entry);
@@ -17805,7 +17870,7 @@ convert_port_entry_to_map(
 			if (ip_active(port) && (ip_kotype(port)
 			    == IKOT_NAMED_ENTRY)) {
 				named_entry =
-				    (vm_named_entry_t)port->ip_kobject;
+				    (vm_named_entry_t) ip_get_kobject(port);
 				if (!(lck_mtx_try_lock(&(named_entry)->Lock))) {
 					ip_unlock(port);
 
@@ -17863,7 +17928,7 @@ try_again:
 		ip_lock(port);
 		if (ip_active(port) &&
 		    (ip_kotype(port) == IKOT_NAMED_ENTRY)) {
-			named_entry = (vm_named_entry_t)port->ip_kobject;
+			named_entry = (vm_named_entry_t) ip_get_kobject(port);
 			if (!(lck_mtx_try_lock(&(named_entry)->Lock))) {
 				ip_unlock(port);
 				try_failed_count++;
@@ -18688,6 +18753,7 @@ again:
 		}
 	}
 
+	*shared_count = (unsigned int) ((dirty_shared_count * PAGE_SIZE_64) / (1024 * 1024ULL));
 	if (evaluation_phase) {
 		unsigned int shared_pages_threshold = (memorystatus_freeze_shared_mb_per_process_max * 1024 * 1024ULL) / PAGE_SIZE_64;
 
@@ -18720,7 +18786,6 @@ again:
 		goto again;
 	} else {
 		kr = KERN_SUCCESS;
-		*shared_count = (unsigned int) ((dirty_shared_count * PAGE_SIZE_64) / (1024 * 1024ULL));
 	}
 
 done:

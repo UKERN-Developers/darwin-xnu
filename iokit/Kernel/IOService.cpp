@@ -134,6 +134,8 @@ const OSSymbol *                gIOMatchedPersonalityKey;
 const OSSymbol *                gIORematchPersonalityKey;
 const OSSymbol *                gIORematchCountKey;
 const OSSymbol *                gIODEXTMatchCountKey;
+const OSSymbol *                gIOSupportedPropertiesKey;
+const OSSymbol *                gIOUserServicePropertiesKey;
 #if !CONFIG_EMBEDDED
 const OSSymbol *                gIOServiceLegacyMatchingRegistryIDKey;
 #endif
@@ -183,6 +185,7 @@ const OSSymbol *                gIOWillTerminateNotification;
 const OSSymbol *                gIOServiceDEXTEntitlementsKey;
 const OSSymbol *                gIODriverKitEntitlementKey;
 const OSSymbol *                gIODriverKitUserClientEntitlementsKey;
+const OSSymbol *                gIODriverKitUserClientEntitlementAllowAnyKey;
 const OSSymbol *                gIOMatchDeferKey;
 
 const OSSymbol *                gIOGeneralInterest;
@@ -429,6 +432,9 @@ IOService::initialize( void )
 	gIOInterruptSpecifiersKey
 	        = OSSymbol::withCStringNoCopy("IOInterruptSpecifiers");
 
+	gIOSupportedPropertiesKey = OSSymbol::withCStringNoCopy(kIOSupportedPropertiesKey);
+	gIOUserServicePropertiesKey = OSSymbol::withCStringNoCopy(kIOUserServicePropertiesKey);
+
 	gIOMapperIDKey = OSSymbol::withCStringNoCopy(kIOMapperIDKey);
 
 	gIOKitDebugKey      = OSSymbol::withCStringNoCopy( kIOKitDebugKey );
@@ -480,6 +486,7 @@ IOService::initialize( void )
 	gIOServiceDEXTEntitlementsKey           = OSSymbol::withCStringNoCopy( kIOServiceDEXTEntitlementsKey );
 	gIODriverKitEntitlementKey             = OSSymbol::withCStringNoCopy( kIODriverKitEntitlementKey );
 	gIODriverKitUserClientEntitlementsKey   = OSSymbol::withCStringNoCopy( kIODriverKitUserClientEntitlementsKey );
+	gIODriverKitUserClientEntitlementAllowAnyKey   = OSSymbol::withCStringNoCopy( kIODriverKitUserClientEntitlementAllowAnyKey );
 	gIOMatchDeferKey                        = OSSymbol::withCStringNoCopy( kIOMatchDeferKey );
 
 	gIOPlatformFunctionHandlerSet               = OSSymbol::withCStringNoCopy(kIOPlatformFunctionHandlerSet);
@@ -3023,8 +3030,12 @@ IOService::terminateWorker( IOOptionBits options )
 				}
 				if (doPhase2) {
 					if (kIOServiceNeedWillTerminate & victim->__state[1]) {
-						_workLoopAction((IOWorkLoop::Action) &actionWillStop,
-						    victim, (void *)(uintptr_t) options, NULL );
+						if (NULL == victim->reserved->uvars) {
+							_workLoopAction((IOWorkLoop::Action) &actionWillStop,
+							    victim, (void *)(uintptr_t) options);
+						} else {
+							actionWillStop(victim, options, NULL, NULL, NULL);
+						}
 					}
 
 					OSArray * notifiers;

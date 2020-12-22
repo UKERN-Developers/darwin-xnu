@@ -162,6 +162,9 @@ extern const OSSymbol *     gIODeviceMemoryKey;
 extern const OSSymbol *     gIOInterruptControllersKey;
 extern const OSSymbol *     gIOInterruptSpecifiersKey;
 
+extern const OSSymbol *     gIOSupportedPropertiesKey;
+extern const OSSymbol *     gIOUserServicePropertiesKey;
+
 extern const OSSymbol *     gIOBSDKey;
 extern const OSSymbol *     gIOBSDNameKey;
 extern const OSSymbol *     gIOBSDMajorKey;
@@ -171,6 +174,7 @@ extern const OSSymbol *     gIOBSDUnitKey;
 extern const OSSymbol *     gIODriverKitEntitlementKey;
 extern const OSSymbol *     gIOServiceDEXTEntitlementsKey;
 extern const OSSymbol *     gIODriverKitUserClientEntitlementsKey;
+extern const OSSymbol *     gIODriverKitUserClientEntitlementAllowAnyKey;
 extern const OSSymbol *     gIOMatchDeferKey;
 
 extern SInt32 IOServiceOrdering( const OSMetaClassBase * inObj1, const OSMetaClassBase * inObj2, void * ref );

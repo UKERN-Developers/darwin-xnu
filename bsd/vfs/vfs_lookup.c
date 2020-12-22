@@ -183,6 +183,8 @@ namei(struct nameidata *ndp)
 	int volfs_restarts = 0;
 #endif
 	size_t bytes_copied = 0;
+	bool take_proc_lock = !(ndp->ni_flag & NAMEI_NOPROCLOCK);
+	bool proc_lock_taken = false;
 
 	fdp = p->p_fd;
 
@@ -348,12 +350,33 @@ retry_copy:
 
 	/*
 	 * determine the starting point for the translation.
+	 *
+	 * We hold the proc_dirs lock across the lookup so that the
+	 * process rootdir and cwd are stable (i.e. the usecounts
+	 * on them are mainatained for the duration of the lookup)
 	 */
-	if ((ndp->ni_rootdir = fdp->fd_rdir) == NULLVP) {
-		if (!(fdp->fd_flags & FD_CHROOT)) {
-			ndp->ni_rootdir = rootvnode;
-		}
+	if (take_proc_lock) {
+		assert(proc_lock_taken == false);
+		proc_dirs_lock_shared(p);
+		proc_lock_taken = true;
 	}
+	if (!(fdp->fd_flags & FD_CHROOT)) {
+		ndp->ni_rootdir = rootvnode;
+	} else {
+		ndp->ni_rootdir = fdp->fd_rdir;
+	}
+
+	if (!ndp->ni_rootdir) {
+		if (!(fdp->fd_flags & FD_CHROOT)) {
+			printf("rootvnode is not set\n");
+		} else {
+			/* This should be a panic */
+			printf("fdp->fd_rdir is not set\n");
+		}
+		error = ENOENT;
+		goto error_out;
+	}
+
 	cnp->cn_nameptr = cnp->cn_pnbuf;
 
 	ndp->ni_usedvp = NULLVP;
@@ -372,9 +395,11 @@ retry_copy:
 	}
 
 	if (dp == NULLVP || (dp->v_lflag & VL_DEAD)) {
+		dp = NULLVP;
 		error = ENOENT;
 		goto error_out;
 	}
+
 	ndp->ni_dvp = NULLVP;
 	ndp->ni_vp  = NULLVP;
 
@@ -393,8 +418,8 @@ retry_copy:
 			goto error_out;
 		}
 #endif
-
 		ndp->ni_startdir = dp;
+		dp = NULLVP;
 
 		if ((error = lookup(ndp))) {
 			goto error_out;
@@ -404,6 +429,10 @@ retry_copy:
 		 * Check for symbolic link
 		 */
 		if ((cnp->cn_flags & ISSYMLINK) == 0) {
+			if (proc_lock_taken) {
+				proc_dirs_unlock_shared(p);
+				proc_lock_taken = false;
+			}
 			return 0;
 		}
 
@@ -428,6 +457,10 @@ out_drop:
 		vnode_put(ndp->ni_vp);
 	}
 error_out:
+	if (proc_lock_taken) {
+		proc_dirs_unlock_shared(p);
+		proc_lock_taken = false;
+	}
 	if ((cnp->cn_flags & HASBUF)) {
 		cnp->cn_flags &= ~HASBUF;
 		FREE_ZONE(cnp->cn_pnbuf, cnp->cn_pnlen, M_NAMEI);
@@ -1121,13 +1154,15 @@ dirloop:
 			tdp = dp;
 			dp = tdp->v_mount->mnt_vnodecovered;
 
-			vnode_put(tdp);
-
 			if ((vnode_getwithref(dp))) {
+				vnode_put(tdp);
 				dp = NULLVP;
 				error = ENOENT;
 				goto bad;
 			}
+
+			vnode_put(tdp);
+
 			ndp->ni_dvp = dp;
 			dp_authorized = 0;
 		}

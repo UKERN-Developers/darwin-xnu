@@ -236,6 +236,10 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, doautorcvbuf,
     CTLFLAG_RW | CTLFLAG_LOCKED, u_int32_t, tcp_do_autorcvbuf, 1,
     "Enable automatic socket buffer tuning");
 
+SYSCTL_SKMEM_TCP_INT(OID_AUTO, autotunereorder,
+    CTLFLAG_RW | CTLFLAG_LOCKED, u_int32_t, tcp_autotune_reorder, 1,
+    "Enable automatic socket buffer tuning even when reordering is present");
+
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, autorcvbufmax,
     CTLFLAG_RW | CTLFLAG_LOCKED, u_int32_t, tcp_autorcvbuf_max, 512 * 1024,
     "Maximum receive socket buffer size");
@@ -1159,10 +1163,6 @@ tcp_sbrcv_grow(struct tcpcb *tp, struct sockbuf *sbrcv,
 	 * - the high water mark already reached the maximum
 	 * - the stream is in background and receive side is being
 	 * throttled
-	 * - if there are segments in reassembly queue indicating loss,
-	 * do not need to increase recv window during recovery as more
-	 * data is not going to be sent. A duplicate ack sent during
-	 * recovery should not change the receive window
 	 */
 	if (tcp_do_autorcvbuf == 0 ||
 	    (sbrcv->sb_flags & SB_AUTOSIZE) == 0 ||
@@ -1170,7 +1170,7 @@ tcp_sbrcv_grow(struct tcpcb *tp, struct sockbuf *sbrcv,
 	    sbrcv->sb_hiwat >= rcvbuf_max ||
 	    (tp->t_flagsext & TF_RECV_THROTTLE) ||
 	    (so->so_flags1 & SOF1_EXTEND_BK_IDLE_WANTED) ||
-	    !LIST_EMPTY(&tp->t_segq)) {
+	    (!tcp_autotune_reorder && !LIST_EMPTY(&tp->t_segq))) {
 		/* Can not resize the socket buffer, just return */
 		goto out;
 	}
@@ -1215,8 +1215,9 @@ tcp_sbrcv_grow(struct tcpcb *tp, struct sockbuf *sbrcv,
 		if (TSTMP_GEQ(to->to_tsecr, tp->rfbuf_ts)) {
 			if (tp->rfbuf_cnt + pktlen > (sbrcv->sb_hiwat -
 			    (sbrcv->sb_hiwat >> 1))) {
-				tp->rfbuf_cnt += pktlen;
 				int32_t rcvbuf_inc, min_incr;
+
+				tp->rfbuf_cnt += pktlen;
 				/*
 				 * Increment the receive window by a
 				 * multiple of maximum sized segments.
@@ -2794,6 +2795,7 @@ findpcb:
 				TCP_LOG_DROP_PCB(TCP_LOG_HDR, th, tp, false, " in_pcbinshash failed");
 				goto drop;
 			}
+			socket_lock(oso, 0);
 #if INET6
 			if (isipv6) {
 				/*
@@ -2822,7 +2824,6 @@ findpcb:
 				inp->inp_options = ip_srcroute();
 				inp->inp_ip_tos = oinp->inp_ip_tos;
 			}
-			socket_lock(oso, 0);
 #if IPSEC
 			/* copy old policy into new socket's */
 			if (sotoinpcb(oso)->inp_sp) {
@@ -3207,8 +3208,6 @@ findpcb:
 					tp->t_rexmtthresh = tcprexmtthresh;
 				}
 
-				m_freem(m);
-
 				/*
 				 * If all outstanding data are acked, stop
 				 * retransmit timer, otherwise restart timer
@@ -3247,6 +3246,8 @@ findpcb:
 				}
 
 				tcp_tfo_rcv_ack(tp, th);
+
+				m_freem(m);
 
 				tcp_check_timer_state(tp);
 
@@ -5401,6 +5402,11 @@ dodata:
 				memcpy(&saved_hdr, ip, ip->ip_hl << 2);
 				ip = (struct ip *)&saved_hdr[0];
 			}
+
+			if (tcp_autotune_reorder) {
+				tcp_sbrcv_grow(tp, &so->so_rcv, &to, tlen, TCP_AUTORCVBUF_MAX(ifp));
+			}
+
 			memcpy(&saved_tcphdr, th, sizeof(struct tcphdr));
 			thflags = tcp_reass(tp, th, &tlen, m, ifp, &read_wakeup);
 			th = &saved_tcphdr;

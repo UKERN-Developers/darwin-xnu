@@ -113,6 +113,9 @@ extern boolean_t vm_pressure_events_enabled;
 #define VM_REAL_FAULT_ADDR_PURGABLE             0x03
 #define VM_REAL_FAULT_ADDR_EXTERNAL             0x04
 #define VM_REAL_FAULT_ADDR_SHAREDCACHE          0x05
+#define VM_REAL_FAULT_FAST                      0x06
+#define VM_REAL_FAULT_SLOW                      0x07
+#define VM_MAP_LOOKUP_OBJECT                    0x08
 
 
 
@@ -152,6 +155,9 @@ extern int      vm_debug_events;
 
 #define VM_PAGE_GRAB                    0x126
 #define VM_PAGE_RELEASE                 0x127
+#define VM_COMPRESSOR_COMPACT_AND_SWAP  0x128
+#define VM_COMPRESSOR_DO_DELAYED_COMPACTIONS 0x129
+
 
 #define VM_PRESSURE_EVENT               0x130
 #define VM_EXECVE                       0x131

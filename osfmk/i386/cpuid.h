@@ -183,6 +183,7 @@
 #define CPUID_LEAF7_EXTFEATURE_AVX5124VNNIW     _Bit(2)         /* AVX512_4VNNIW */
 #define CPUID_LEAF7_EXTFEATURE_AVX5124FMAPS     _Bit(3)         /* AVX512_4FMAPS */
 #define CPUID_LEAF7_EXTFEATURE_FSREPMOV         _Bit(4)         /* Fast Short REP MOV */
+#define CPUID_LEAF7_EXTFEATURE_SRBDS_CTRL       _Bit(9)         /* SRBDS MSR Presence and Mitigation Control */
 #define CPUID_LEAF7_EXTFEATURE_MDCLEAR          _Bit(10)        /* Overloaded VERW / L1D_FLUSH */
 #define CPUID_LEAF7_EXTFEATURE_TSXFA            _Bit(13)        /* TSX RTM_FORCE_ABORT MSR */
 #define CPUID_LEAF7_EXTFEATURE_IBRS             _Bit(26)        /* IBRS / IBPB */
@@ -262,12 +263,10 @@
 #define CPUID_MODEL_SKYLAKE_ULT         0x4E
 #define CPUID_MODEL_SKYLAKE_ULX         0x4E
 #define CPUID_MODEL_SKYLAKE_DT          0x5E
-#if !defined(RC_HIDE_XNU_J137)
 #define CPUID_MODEL_SKYLAKE_W           0x55
 #define PLATID_XEON_SP_1                0x00
 #define PLATID_XEON_SP_2                0x07
 #define PLATID_MAYBE_XEON_SP            0x01
-#endif /* not RC_HIDE_XNU_J137 */
 #define CPUID_MODEL_KABYLAKE            0x8E
 #define CPUID_MODEL_KABYLAKE_ULT        0x8E
 #define CPUID_MODEL_KABYLAKE_ULX        0x8E
@@ -476,7 +475,7 @@ typedef struct {
 
 typedef enum {
 	CPU_INTEL_SEGCHK = 1,
-	CPU_INTEL_TSXFA
+	CPU_INTEL_TSXFA = 2
 } cpu_wa_e;
 
 typedef enum {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -232,7 +232,7 @@ ah4_input(struct mbuf *m, int off)
 		 */
 		if (siz1 < siz) {
 			ipseclog((LOG_NOTICE, "sum length too short in IPv4 AH input "
-			    "(%lu, should be at least %lu): %s\n",
+			    "(%u, should be at least %u): %s\n",
 			    (u_int32_t)siz1, (u_int32_t)siz,
 			    ipsec4_logpacketstr(ip, spi)));
 			IPSEC_STAT_INCREMENT(ipsecstat.in_inval);
@@ -240,7 +240,7 @@ ah4_input(struct mbuf *m, int off)
 		}
 		if ((ah->ah_len << 2) - sizoff != siz1) {
 			ipseclog((LOG_NOTICE, "sum length mismatch in IPv4 AH input "
-			    "(%d should be %lu): %s\n",
+			    "(%d should be %u): %s\n",
 			    (ah->ah_len << 2) - sizoff, (u_int32_t)siz1,
 			    ipsec4_logpacketstr(ip, spi)));
 			IPSEC_STAT_INCREMENT(ipsecstat.in_inval);
@@ -631,17 +631,17 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 #pragma unused(proto)
 	struct mbuf *m = *mp;
 	int off = *offp;
-	struct ip6_hdr *ip6;
-	struct ah *ah;
-	u_int32_t spi;
-	const struct ah_algorithm *algo;
-	size_t siz;
-	size_t siz1;
-	u_char *cksum;
+	struct ip6_hdr *ip6 = NULL;
+	struct ah *ah = NULL;
+	u_int32_t spi = 0;
+	const struct ah_algorithm *algo = NULL;
+	size_t siz = 0;
+	size_t siz1 = 0;
+	u_char *cksum = NULL;
 	struct secasvar *sav = NULL;
-	u_int16_t nxt;
+	u_int16_t nxt = IPPROTO_DONE;
 	size_t stripsiz = 0;
-	sa_family_t ifamily;
+	sa_family_t ifamily = AF_UNSPEC;
 
 	IP6_EXTHDR_CHECK(m, off, sizeof(struct ah), {return IPPROTO_DONE;});
 	ah = (struct ah *)(void *)(mtod(m, caddr_t) + off);
@@ -708,7 +708,7 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 		 */
 		if (siz1 < siz) {
 			ipseclog((LOG_NOTICE, "sum length too short in IPv6 AH input "
-			    "(%lu, should be at least %lu): %s\n",
+			    "(%u, should be at least %u): %s\n",
 			    (u_int32_t)siz1, (u_int32_t)siz,
 			    ipsec6_logpacketstr(ip6, spi)));
 			IPSEC_STAT_INCREMENT(ipsec6stat.in_inval);
@@ -716,7 +716,7 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 		}
 		if ((ah->ah_len << 2) - sizoff != siz1) {
 			ipseclog((LOG_NOTICE, "sum length mismatch in IPv6 AH input "
-			    "(%d should be %lu): %s\n",
+			    "(%d should be %u): %s\n",
 			    (ah->ah_len << 2) - sizoff, (u_int32_t)siz1,
 			    ipsec6_logpacketstr(ip6, spi)));
 			IPSEC_STAT_INCREMENT(ipsec6stat.in_inval);
@@ -724,6 +724,8 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 		}
 		IP6_EXTHDR_CHECK(m, off, sizeof(struct ah) + sizoff + siz1,
 		    {return IPPROTO_DONE;});
+		ip6 = mtod(m, struct ip6_hdr *);
+		ah = (struct ah *)(void *)(mtod(m, caddr_t) + off);
 	}
 
 	/*
@@ -1026,6 +1028,7 @@ fail:
 	}
 	if (m) {
 		m_freem(m);
+		*mp = NULL;
 	}
 	return IPPROTO_DONE;
 }

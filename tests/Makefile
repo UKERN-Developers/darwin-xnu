@@ -38,6 +38,9 @@ CODESIGN_ALLOCATE:=$(shell xcrun -sdk "$(TARGETSDK)" -find codesign_allocate)
 
 atm_diagnostic_flag: OTHER_CFLAGS += drop_priv.c
 
+atm_diagnostic_flag_entitled: CODE_SIGN_ENTITLEMENTS = atm_diagnostic_flag.entitlements
+atm_diagnostic_flag_entitled: OTHER_CFLAGS += drop_priv.c
+
 testposixshm: INVALID_ARCHS = i386
 
 avx: INVALID_ARCHS = i386
@@ -74,7 +77,7 @@ install-immovable_send_client: immovable_send_client
 kdebug: INVALID_ARCHS = i386
 kdebug: OTHER_LDFLAGS = -framework ktrace -ldarwintest_utils -framework kperf
 
-EXCLUDED_SOURCES += drop_priv.c kperf_helpers.c xnu_quick_test_helpers.c memorystatus_assertion_helpers.c
+EXCLUDED_SOURCES += drop_priv.c kperf_helpers.c xnu_quick_test_helpers.c memorystatus_assertion_helpers.c bpflib.c in_cksum.c
 
 ifneq ($(PLATFORM),iPhoneOS)
 EXCLUDED_SOURCES += jumbo_va_spaces_28530648.c perf_compressor.c memorystatus_freeze_test.c
@@ -97,6 +100,10 @@ stackshot_tests: OTHER_CFLAGS += -Wno-objc-messaging-id
 stackshot_tests: OTHER_LDFLAGS += -lkdd -ldarwintest_utils -framework Foundation
 stackshot_tests: INVALID_ARCHS = i386
 
+stackshot_accuracy: OTHER_CFLAGS += -ldarwintest_utils -Wno-objc-messaging-id
+stackshot_accuracy: OTHER_LDFLAGS += -lkdd -ldarwintest_utils -framework Foundation
+stackshot_accuracy: INVALID_ARCHS = i386
+
 telemetry: OTHER_LDFLAGS = -framework ktrace -framework CoreFoundation
 telemetry: INVALID_ARCHS = i386
 
@@ -105,7 +112,8 @@ memorystatus_zone_test: OTHER_CFLAGS += -isystem $(SDKROOT)/System/Library/Frame
 memorystatus_zone_test: OTHER_LDFLAGS += -framework ktrace
 memorystatus_zone_test: OTHER_LDFLAGS += -ldarwintest_utils
 
-kpc: OTHER_LDFLAGS += -framework kperf
+kpc: OTHER_LDFLAGS += -framework kperf -framework ktrace
+kpc: INVALID_ARCHS = i386
 
 kperf: INVALID_ARCHS = i386
 kperf: OTHER_CFLAGS += kperf_helpers.c
@@ -269,20 +277,40 @@ task_vm_info_decompressions: INVALID_ARCHS = x86_64 i386
 socket_bind_35243417: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 socket_bind_35685803: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 
+sioc-if-addr-bounds: sioc-if-addr-bounds.c
+
 net_tuntests: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
+
+net_bridge: OTHER_CFLAGS += bpflib.c in_cksum.c
+net_bridge: OTHER_LDFLAGS += -ldarwintest_utils
 
 ifneq (osx,$(TARGET_NAME))
 EXCLUDED_SOURCES += no32exec_35914211.c no32exec_35914211_helper.c
-endif
+else  # target = osx
+CUSTOM_TARGETS += no32exec_35914211_helper no32exec_35914211_helper_binprefs
 
-no32exec_35914211_helper: INVALID_ARCHS = x86_64
+no32exec_35914211_helper: INVALID_ARCHS = x86_64 i386
+no32exec_35914211_helper:
+	$(CC) $(LDFLAGS) $(CFLAGS) -arch i386  no32exec_35914211_helper.c -o $(SYMROOT)/$@;
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/$@;
+
+install-no32exec_35914211_helper:
+	mkdir -p $(INSTALLDIR)
+	cp $(SYMROOT)/no32exec_35914211_helper $(INSTALLDIR)/
+
+no32exec_35914211_helper_binprefs: INVALID_ARCHS = x86_64 i386
 no32exec_35914211_helper_binprefs:
-	$(CC) $(OTHER_CFLAGS) $(CFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) -ldarwintest -arch i386 -arch x86_64 \
-		no32exec_35914211_helper_binprefs.c -o $(SYMROOT)/no32exec_35914211_helper_binprefs
+	$(CC) $(OTHER_CFLAGS) $(CFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) -arch i386 -arch x86_64  no32exec_35914211_helper.c -o $(SYMROOT)/$@;
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/$@;
+
+install-no32exec_35914211_helper_binprefs:
+	mkdir -p $(INSTALLDIR)
+	cp $(SYMROOT)/no32exec_35914211_helper_binprefs $(INSTALLDIR)/
 
 no32exec_35914211: INVALID_ARCHS = i386
 no32exec_35914211: no32exec_35914211_helper
 no32exec_35914211: no32exec_35914211_helper_binprefs
+endif  # (osx,$(TARGET_NAME)))
 
 MIG:=SDKROOT=$(SDKROOT) $(shell xcrun -sdk "$(TARGETSDK)" -find mig)
 
@@ -329,5 +357,19 @@ vm_phys_footprint: OTHER_LDFLAGS += -framework CoreFoundation -framework IOSurfa
 debug_control_port_for_pid: CODE_SIGN_ENTITLEMENTS = ./debug_control_port_for_pid_entitlement.plist
 
 prng: OTHER_LDFLAGS += -ldarwintest_utils
+
+OTHER_TEST_TARGETS += io_catalog_send_data
+
+io_catalog_send_data: INVALID_ARCHS = i386
+io_catalog_send_data: OTHER_CFLAGS += -DTEST_UNENTITLED -framework IOKit -framework CoreFoundation -framework Foundation
+io_catalog_send_data: iokit/io_catalog_send_data.m
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/$@
+
+task_create_suid_cred: CODE_SIGN_ENTITLEMENTS = ./task_create_suid_cred_entitlement.plist
+
+OTHER_TEST_TARGETS += task_create_suid_cred_unentitled
+task_create_suid_cred_unentitled: OTHER_CFLAGS += -DUNENTITLED
+task_create_suid_cred_unentitled: task_create_suid_cred.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/$@
 
 include $(DEVELOPER_DIR)/AppleInternal/Makefiles/darwintest/Makefile.targets

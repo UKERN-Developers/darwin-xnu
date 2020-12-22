@@ -65,6 +65,8 @@
  * FreeBSD-Id: nfs_node.c,v 1.22 1997/10/28 14:06:20 bde Exp $
  */
 
+#include <nfs/nfs_conf.h>
+#if CONFIG_NFS_CLIENT
 
 #include <sys/param.h>
 #include <sys/kernel.h>
@@ -561,7 +563,6 @@ loop:
 	{
 		error = vnode_create(VNCREATE_FLAVOR, VCREATESIZE, &vfsp, &np->n_vnode);
 	}
-notsup:
 	if (error) {
 		FSDBG(266, 0, np, np->n_flag, 0xb1eb1e);
 		nfs_node_unlock(np);
@@ -913,7 +914,6 @@ nfs_vnop_reclaim(
 {
 	vnode_t vp = ap->a_vp;
 	nfsnode_t np = VTONFS(vp);
-	vfs_context_t ctx = ap->a_context;
 	struct nfs_open_file *nofp, *nextnofp;
 	struct nfs_file_lock *nflp, *nextnflp;
 	struct nfs_lock_owner *nlop, *nextnlop;
@@ -1453,3 +1453,5 @@ out:
 
 	return i <= nfsnodehash;
 }
+
+#endif /* CONFIG_NFS_CLIENT */

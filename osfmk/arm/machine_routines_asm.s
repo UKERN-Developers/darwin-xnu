@@ -35,13 +35,15 @@
 	.align	2
 	.globl	EXT(machine_set_current_thread)
 LEXT(machine_set_current_thread)
+	ldr		r1, [r0, ACT_CPUDATAP]
+	str		r0, [r1, CPU_ACTIVE_THREAD]
 	mcr		p15, 0, r0, c13, c0, 4				// Write TPIDRPRW
 	ldr		r1, [r0, TH_CTH_SELF]
 	mrc		p15, 0, r2, c13, c0, 3				// Read TPIDRURO
 	and		r2, r2, #3							// Extract cpu number
 	orr		r1, r1, r2							//
 	mcr		p15, 0, r1, c13, c0, 3				// Write TPIDRURO
-	ldr		r1, [r0, TH_CTH_DATA]
+	mov		r1, #0
 	mcr		p15, 0, r1, c13, c0, 2				// Write TPIDRURW
 	bx		lr
 
